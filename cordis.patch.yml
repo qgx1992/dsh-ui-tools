@@ -1,0 +1,5 @@
+# dsh-ui-tools bundle patch: inserts the plugin into the loader
+# so its client bundle gets composed and served at /plugins/<id>/client.js.
+- insert:
+    - id: ui-tools
+      name: 'dsh-ui-tools'
