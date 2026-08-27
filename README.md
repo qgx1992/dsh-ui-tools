@@ -15,16 +15,21 @@ DSH Web 插件：两个 UI 工具合并成一个包，只动对应控件，不�
 
 ## 功能二：侧边栏工作区折叠/展开（原 dsh-workspace-collapse）
 
-在侧边栏工作区列表下方渲染「折叠全部 / 展开全部」工具条（窄栏自动隐藏），一键折叠/展开所有工作区分组。
+在侧边栏底部动作区渲染「折叠全部 / 展开全部」工具条，一键折叠/展开所有工作区分组。
 
 ## 实现原理
 
 - 官方模型组件照常注册在 `conversation.input.model`（数据/提交逻辑原样保留），用 CSS 隐藏官方触发按钮；
 - 本插件通过 `modelDirectories` 服务读取同一份模型目录（groups = 供应商分组），注册到 `conversation.input.right`（list slot）追加双按钮；
 - 选择模型/推理等级时调用官方 `directory.select(...)`，官方 store 同步更新，输入框状态与原生一致；
-- 折叠条注册到 `sidebar.footer.action`，通过 DOM 提升到工作区列表下方（MutationObserver 保持位置）。
+- 折叠条注册到 `sidebar.footer.action`（**纯 slot 渲染，不搬动 DOM**）。v0.1.1 起不再使用 MutationObserver / ResizeObserver——旧实现通过全局 `document.body` 观察器 + 定时把工具条节点搬进侧边栏列，会与框架重渲染互相触发，导致渲染进程 100% CPU 空转、界面卡死。
 
 两个功能各自独立命名空间（locale / slot id / data-* 前缀），互不干扰。
+
+## 变更记录
+
+- **v0.1.1（2026-08-27）**：修复功能二导致界面卡死的缺陷——移除全局 `document.body` MutationObserver 与 40ms 定时搬节点逻辑，工具条改为纯 slot 渲染；同时移除窄栏自动隐藏（ResizeObserver）。净删约 50 行。
+- **v0.1.0**：合并 `dsh-model-select-style`（模型选择双按钮）+ `dsh-workspace-collapse`（侧边栏折叠/展开）。
 
 ## 安装
 
@@ -45,7 +50,12 @@ dsh plugin --profile web add github:qgx1992/dsh-ui-tools
 
 ## 停用 / 卸载
 
-- 临时停用：设置 → 插件 中停用本插件（两个功能同时关闭）。
+- 临时停用（推荐，无需卸载）：在 `~/.dsh/profiles/web/cordis.patch.yml` 追加下面两行，重启 DSH 即可（要恢复就删掉这两行再重启）：
+  ```yaml
+  - id: ui-tools
+    disabled: true
+  ```
+- 设置 → 插件 中的停用同样有效（两个功能同时关闭）。
 - 彻底卸载：从 bundles 与 dependencies 移除条目、删除 node_modules 内链接与本地插件目录。
 
 ## 明确不覆盖的范围
