@@ -15,21 +15,22 @@ DSH Web 插件：两个 UI 工具合并成一个包，只动对应控件，不�
 
 ## 功能二：侧边栏工作区折叠/展开（原 dsh-workspace-collapse）
 
-在侧边栏**工作区列表下方**渲染「折叠全部 / 展开全部」工具条，一键折叠/展开所有工作区分组。
+在侧边栏**工作区列表下方**渲染「折叠全部 / 展开全部」工具条，一键折叠/展开所有工作区分组（纯 slot 渲染 + CSS 对齐，不搬动 DOM）。
 
 ## 实现原理
 
 - 官方模型组件照常注册在 `conversation.input.model`（数据/提交逻辑原样保留），用 CSS 隐藏官方触发按钮；
 - 本插件通过 `modelDirectories` 服务读取同一份模型目录（groups = 供应商分组），注册到 `conversation.input.right`（list slot）追加双按钮；
 - 选择模型/推理等级时调用官方 `directory.select(...)`，官方 store 同步更新，输入框状态与原生一致；
-- 折叠条注册到 `sidebar.footer.action`，渲染后由**收窄的 MutationObserver**（只观察 footer 宿主容器的 childList，无定时器、不观察 document.body）搬进工作区列（列表下方、footer 上方）；框架重渲染把工具条放回 footer 时搬一次，搬动发生在工作区列、不会反向触发观察器，因此不会像 v0.1.0 那样死循环卡死。
+- 折叠条注册到 `sidebar.footer.action`——官方渲染位置就是 footer 顶部、紧贴工作区列表正下方，用 CSS（对齐 `--dsh-session-list-edge-inset` 内边距）贴合列表即可，**不搬动 DOM**。搬动 slot 渲染出来的节点会与框架重渲染互相触发，导致渲染进程 100% CPU 卡死（v0.1.0 全局观察器、v0.1.2 收窄观察器均因此卡死；v0.1.3 起彻底不搬）。
 
 两个功能各自独立命名空间（locale / slot id / data-* 前缀），互不干扰。
 
 ## 变更记录
 
-- **v0.1.2（2026-08-27）**：恢复功能二工具条位置（工作区列表下方）——用收窄的 footer 宿主观察器代替 v0.1.0 的全局观察器 + 定时器，既保持原位置又不会死循环。
-- **v0.1.1（2026-08-27）**：修复功能二导致界面卡死的缺陷——移除全局 `document.body` MutationObserver 与 40ms 定时搬节点逻辑（当时工具条因此退回到 footer 位置），同时移除窄栏自动隐藏（ResizeObserver）。
+- **v0.1.3（2026-08-27）**：彻底放弃搬动 DOM——v0.1.2 的收窄观察器方案实测仍卡死（搬动 slot 节点与框架互搏）。改为纯 slot 渲染（工具条即官方 `sidebar.footer.action` 位置，紧贴工作区列表下方）+ CSS 对齐列表内边距。
+- **v0.1.2（2026-08-27）**：尝试用收窄的 footer 观察器恢复 v0.1.0 的位置，实测仍卡死，回退。
+- **v0.1.1（2026-08-27）**：修复 v0.1.0 卡死——移除全局 `document.body` MutationObserver 与 40ms 定时搬节点（工具条当时因此回到 footer 位置）。
 - **v0.1.0**：合并 `dsh-model-select-style`（模型选择双按钮）+ `dsh-workspace-collapse`（侧边栏折叠/展开）。
 
 ## 安装
