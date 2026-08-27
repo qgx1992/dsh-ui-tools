@@ -2,3 +2,6 @@
 Thumbs.db
 node_modules/
 *.tgz
+
+# 本机开发指南，默认不推送（仅本地保留，供会话代理读取）
+AGENT.md
