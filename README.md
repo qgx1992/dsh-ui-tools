@@ -1,6 +1,6 @@
 # dsh-ui-tools
 
-DSH Web 插件：三个 UI 工具合并成一个包，只动对应控件，不改 DSH 任何一行源码。
+DSH Web 插件：四个 UI 工具合并成一个包，只动对应控件，不改 DSH 任何一行源码。
 
 ## 功能一：模型选择双按钮（原 dsh-model-select-style）
 
@@ -29,6 +29,16 @@ DSH Web 插件：三个 UI 工具合并成一个包，只动对应控件，不�
 
 **实现原理**：本功能注册进官方开放槽 **`conversation.view`** —— 这正是「轨迹」tab 的注册方式（`dsh-client-ui-trajectory` 插件用同样机制加 tab）。头部 tab 栏由该槽的 ledger 数据驱动渲染，点击切换 / 高亮 / 会话内持久化全部由框架处理，未知 view id 会自动回退到「对话」，**不需要改 DSH 任何一行源码**。我们的 tab 用 `order: 20`（对话=0、轨迹=10 之后），排在第三位。
 
+## 功能四：会话标题旁工作区徽章（v0.3.0 新增）
+
+在会话页头部**标题右侧**显示一个圆角徽章，标出当前会话所属工作区名（与侧边栏分组标题同名），一眼看出当前对话跑在哪个工作区：
+
+- 数据：标准 kit 自带 `useWorkspaces`，从 `workspaces.items` 按 `sessionIds` 反查当前会话所属工作区，取 `title`；
+- 未归入任何工作区（未分组 / 空白会话）时徽章不渲染，不占位；
+- 徽章显示工作区显示名（改名后同步），`title`/`aria-label` 带可读文案。
+
+**实现原理**：本功能注册进官方**纯增量 list 槽 `conversation.session.header.actions`**（session 作用域）——它是头部标题 cluster 内的动作行，位于面包屑标题右侧，正好是「标题旁」。list 槽是加性的（绝不替换标题、无占用冲突，当前该槽无其他插件占用），我们用负数 `order: -100` 让徽章排在其它交互动作之前、紧贴标题。纯 slot 渲染，不搬 DOM、不改源码。
+
 ## 实现原理
 
 - 官方模型组件照常注册在 `conversation.input.model`（数据/提交逻辑原样保留），用 CSS 隐藏官方触发按钮；
@@ -36,12 +46,14 @@ DSH Web 插件：三个 UI 工具合并成一个包，只动对应控件，不�
 - 选择模型/推理等级时调用官方 `directory.select(...)`，官方 store 同步更新，输入框状态与原生一致；
 - 折叠条注册到 `sidebar.footer.action`——官方渲染位置就是 footer 顶部、紧贴工作区列表正下方，用 CSS（对齐 `--dsh-session-list-edge-inset` 内边距）贴合列表即可，**不搬动 DOM**。搬动 slot 渲染出来的节点会与框架重渲染互相触发，导致渲染进程 100% CPU 卡死（v0.1.0 全局观察器、v0.1.2 收窄观察器均因此卡死；v0.1.3 起彻底不搬）。
 - 修改的文件 tab 注册进 `conversation.view`（见功能三）。
+- 工作区徽章注册进 `conversation.session.header.actions`（见功能四）。
 
-三个功能各自独立命名空间（locale / slot id / data-* 前缀），互不干扰。
+四个功能各自独立命名空间（locale / slot id / data-* 前缀），互不干扰。
 
 ## 变更记录
 
-- **v0.2.0（本次）**：新增功能三「修改的文件」选项卡——注册进官方 `conversation.view` 开放槽，会话头部主选项卡区在「对话 / 轨迹」之后多出「修改的文件」，列出本会话改过的所有文件，点击经 Host 打开。
+- **v0.3.0（本次）**：新增功能四「会话标题旁工作区徽章」——注册进官方 `conversation.session.header.actions` 增量 list 槽，在会话页标题右侧显示所属工作区名，纯 slot 渲染不改源码。
+- **v0.2.0**：新增功能三「修改的文件」选项卡——注册进官方 `conversation.view` 开放槽，会话头部主选项卡区在「对话 / 轨迹」之后多出「修改的文件」，列出本会话改过的所有文件，点击经 Host 打开。
 - **v0.1.4（2026-08-27）**：解决与余额插件（dsh-cost-meter）共用 `sidebar.footer.action` 时的同行冲突——纯 CSS 让容器换行、工具条占满整行，自动排到余额下方自己的行。
 - **v0.1.3（2026-08-27）**：彻底放弃搬动 DOM——v0.1.2 的收窄观察器方案实测仍卡死（搬动 slot 节点与框架互搏）。改为纯 slot 渲染（工具条即官方 `sidebar.footer.action` 位置，紧贴工作区列表下方）+ CSS 对齐列表内边距。
 - **v0.1.2（2026-08-27）**：尝试用收窄的 footer 观察器恢复 v0.1.0 的位置，实测仍卡死，回退。
@@ -72,7 +84,7 @@ dsh plugin --profile web add github:qgx1992/dsh-ui-tools
   - id: ui-tools
     disabled: true
   ```
-- 设置 → 插件 中的停用同样有效（三个功能同时关闭）。
+- 设置 → 插件 中的停用同样有效（四个功能同时关闭）。
 - 彻底卸载：从 bundles 与 dependencies 移除条目、删除 node_modules 内链接与本地插件目录。
 
 ## 明确不覆盖的范围
