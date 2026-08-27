@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>dsh-ui-tools 「修改的文件」选项卡预览</title>
+<style>
+  :root {
+    --dsw-alias-brand-primary: #4176e6;
+    --dsw-alias-brand-text: #4176e6;
+    --dsw-alias-label-primary: #1f2329;
+    --dsw-alias-label-secondary: #5c6470;
+    --dsw-alias-label-caption: #8a919e;
+    --dsw-alias-label-tertiary: #a1a8b3;
+    --dsw-alias-interactive-bg-hover: rgba(31,35,41,.06);
+    --dsw-alias-border-l2: #e3e6eb;
+    --dsw-alias-border-l3: #d3d7de;
+    --dsw-specific-menu: #ffffff;
+    --dsw-alias-bg-base: #ffffff;
+    --dsw-alias-state-error-primary: #d64949;
+    --dsw-alias-state-warning-primary: #d17d00;
+    --dsw-shadow-lv3: 0 12px 32px rgba(15,17,21,.16);
+  }
+  body { font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; background: #f3f4f6; margin: 0; padding: 0; color: var(--dsw-alias-label-primary); }
+  .page { max-width: 760px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 15px; margin: 0 0 4px; }
+  .sub { font-size: 12px; color: var(--dsw-alias-label-secondary); margin-bottom: 20px; line-height: 20px; }
+
+  /* ═══ 模拟 DSH 会话头部 tab 栏 ═══ */
+  .mock-window { background: var(--dsw-alias-bg-base); border: 1px solid var(--dsw-alias-border-l2); border-radius: 14px; overflow: hidden; box-shadow: var(--dsw-shadow-lv3); }
+  .tabs { display: flex; gap: 4px; padding: 10px 14px 0; border-bottom: 1px solid var(--dsw-alias-border-l2); }
+  .tab { border: none; background: none; padding: 7px 14px; border-radius: 8px 8px 0 0; font: inherit; font-size: 13px; color: var(--dsw-alias-label-secondary); cursor: pointer; position: relative; }
+  .tab:hover { background: var(--dsw-alias-interactive-bg-hover); }
+  .tab.active { color: var(--dsw-alias-brand-text); font-weight: 500; }
+  .tab.active::after { content: ""; position: absolute; left: 8px; right: 8px; bottom: -1px; height: 2px; border-radius: 2px; background: var(--dsw-alias-brand-primary); }
+  .tab.new { display: inline-flex; align-items: center; gap: 5px; }
+  .tab .tag { font-size: 9px; line-height: 14px; padding: 0 5px; border-radius: 99px; background: color-mix(in srgb, var(--dsw-alias-brand-primary) 12%, transparent); color: var(--dsw-alias-brand-text); }
+
+  /* ═══ 插件注入的样式（与 lib/client.js 的 MFS_CSS 一致）═══ */
+  [data-mfs-root] {
+    display: flex; flex-direction: column; min-height: 0; height: 100%;
+    padding: 12px 16px; gap: 8px; overflow: auto; box-sizing: border-box;
+  }
+  [data-mfs-root] .mfs-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex: none; }
+  [data-mfs-root] .mfs-title { color: var(--dsw-alias-label-secondary, #5c6470); font-size: 12px; font-weight: 500; line-height: 18px; }
+  [data-mfs-root] .mfs-count { color: var(--dsw-alias-label-caption, #8a919e); font-size: 11px; line-height: 16px; }
+  [data-mfs-root] .mfs-state { color: var(--dsw-alias-label-tertiary, #a1a8b3); font-size: 13px; line-height: 20px; padding: 18px 0; text-align: center; }
+  [data-mfs-root] .mfs-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; flex: 1; min-height: 0; }
+  [data-mfs-root] .mfs-item { min-width: 0; }
+  [data-mfs-root] .mfs-file { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; padding: 5px 6px; border: none; border-radius: 8px; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; transition: background .12s ease; }
+  [data-mfs-root] .mfs-file:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(0,0,0,.05)); }
+  [data-mfs-root] .mfs-file:focus-visible { outline: 2px solid color-mix(in srgb, var(--dsw-alias-brand-primary, #4176e6) 55%, transparent); outline-offset: -2px; }
+  [data-mfs-root] .mfs-icon { display: inline-grid; place-items: center; width: 18px; flex: none; color: var(--dsw-alias-label-caption, #8a919e); }
+  [data-mfs-root] .mfs-text { min-width: 0; flex: 1 1 auto; overflow: hidden; }
+  [data-mfs-root] .mfs-name { display: block; color: var(--dsw-alias-label-primary, #1f2329); font-size: 13px; line-height: 18px; font-weight: 500; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
+  [data-mfs-root] .mfs-dir { display: block; color: var(--dsw-alias-label-caption, #8a919e); font-size: 11px; line-height: 15px; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
+  [data-mfs-root] .mfs-ops { display: inline-flex; align-items: center; gap: 4px; flex: none; }
+  [data-mfs-root] .mfs-op { padding: 1px 6px; border-radius: 6px; background: color-mix(in srgb, var(--dsw-alias-brand-primary, #4176e6) 9%, transparent); color: var(--dsw-alias-brand-text, #4176e6); font-size: 11px; line-height: 16px; white-space: nowrap; }
+  [data-mfs-root] .mfs-op[data-mfs-op="op.delete"] { background: color-mix(in srgb, var(--dsw-alias-state-error-primary, #d64949) 10%, transparent); color: var(--dsw-alias-state-error-primary, #d64949); }
+  [data-mfs-root] .mfs-op[data-mfs-op="op.move"] { background: color-mix(in srgb, var(--dsw-alias-state-warning-primary, #d17d00) 10%, transparent); color: var(--dsw-alias-state-warning-primary, #d17d00); }
+  [data-mfs-root] .mfs-op[data-mfs-op="op.copy"], [data-mfs-root] .mfs-op[data-mfs-op="op.mkdir"] { background: color-mix(in srgb, var(--dsw-alias-label-secondary, #5c6470) 10%, transparent); color: var(--dsw-alias-label-secondary, #5c6470); }
+
+  .hint { font-size: 12px; color: var(--dsw-alias-label-tertiary); margin-top: 14px; line-height: 20px; }
+  .toggle { display: inline-flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
+  .toggle button { border: 1px solid var(--dsw-alias-border-l3); background: #fff; border-radius: 8px; padding: 5px 12px; font: inherit; font-size: 12px; cursor: pointer; }
+  .toggle button:hover { background: var(--dsw-alias-interactive-bg-hover); }
+</style>
+</head>
+<body>
+  <div class="page">
+    <h1>「修改的文件」选项卡（静态预览）</h1>
+    <div class="sub">模拟 DSH 会话头部选项卡区（对话 / 轨迹 / <b>修改的文件</b>）。数据为静态 mock，用于预览插件 v0.2.0 新增 tab 的样式。</div>
+
+    <div class="mock-window">
+      <div class="tabs" role="tablist">
+        <button class="tab" type="button" role="tab">对话</button>
+        <button class="tab" type="button" role="tab">轨迹</button>
+        <button class="tab active new" type="button" role="tab" aria-selected="true">修改的文件 <span class="tag">NEW</span></button>
+      </div>
+      <div data-mfs-root style="min-height: 360px" id="root">
+        <div class="mfs-head">
+          <span class="mfs-title">本会话修改的文件</span>
+          <span class="mfs-count" id="count">8 个文件</span>
+        </div>
+        <ul class="mfs-list" id="list"></ul>
+      </div>
+    </div>
+
+    <div class="hint" id="hint">点击文件行 → 模拟经 Host 打开文件（此处仅提示）。下方按钮可切换「有数据 / 空状态 / 加载中」三种形态。</div>
+    <div class="toggle">
+      <button id="btn-data" type="button">有数据</button>
+      <button id="btn-empty" type="button">空状态</button>
+      <button id="btn-loading" type="button">加载中</button>
+    </div>
+  </div>
+
+<script>
+  // ── 与 lib/client.js 提取逻辑同构的静态数据（path + ops） ──
+  const FILES = [
+    { path: "lib/client.js", ops: [["op.edit", 4], ["op.write", 1]] },
+    { path: "package.json", ops: [["op.edit", 1]] },
+    { path: "README.md", ops: [["op.edit", 2]] },
+    { path: "demo/modified-files.html", ops: [["op.write", 1], ["op.create", 1]] },
+    { path: "cordis.patch.yml", ops: [["op.edit", 1]] },
+    { path: "docs/api/schema.json", ops: [["op.write", 2]] },
+    { path: "temp/scratch.js", ops: [["op.delete", 1]] },
+    { path: "docs/api/v2.md", ops: [["op.move", 1]] }
+  ];
+  const OP_TEXT = {
+    "op.edit": "编辑",
+    "op.write": "写入",
+    "op.create": "新建",
+    "op.delete": "删除",
+    "op.move": "移动",
+    "op.copy": "复制",
+    "op.mkdir": "建目录"
+  };
+
+  const root = document.getElementById("root");
+  const list = document.getElementById("list");
+  const count = document.getElementById("count");
+  const hint = document.getElementById("hint");
+
+  const svgPath = '<svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M1.5 2.5h4l1.5 2h7.5v9h-13z"/></svg>';
+
+  function relOf(path, cwd) {
+    if (!cwd) return path;
+    const base = (cwd.endsWith("/") ? cwd : cwd + "/").toLowerCase();
+    const lower = path.toLowerCase();
+    if (lower === cwd.toLowerCase()) return "/";
+    if (lower.startsWith(base)) return path.slice(base.length);
+    return path;
+  }
+
+  function render(files) {
+    list.innerHTML = "";
+    count.textContent = files.length + " 个文件";
+    files.forEach((entry) => {
+      const li = document.createElement("li");
+      li.className = "mfs-item";
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "mfs-file";
+      btn.title = entry.path + "：修改 " + entry.ops.reduce((a, [_, n]) => a + n, 0) + " 次";
+      const icon = document.createElement("span");
+      icon.className = "mfs-icon";
+      icon.setAttribute("aria-hidden", "true");
+      icon.innerHTML = svgPath;
+      const text = document.createElement("span");
+      text.className = "mfs-text";
+      const display = relOf(entry.path, "C:/Users/QIU/.dsh/local-plugins/dsh-ui-tools");
+      const name = document.createElement("span");
+      name.className = "mfs-name";
+      name.textContent = display.slice(display.lastIndexOf("/") + 1);
+      const dir = document.createElement("span");
+      dir.className = "mfs-dir";
+      dir.textContent = display.slice(0, display.lastIndexOf("/") + 1);
+      text.appendChild(name);
+      if (dir.textContent) text.appendChild(dir);
+      const ops = document.createElement("span");
+      ops.className = "mfs-ops";
+      entry.ops.forEach(([op, n]) => {
+        const tag = document.createElement("span");
+        tag.className = "mfs-op";
+        tag.setAttribute("data-mfs-op", op);
+        tag.textContent = n > 1 ? OP_TEXT[op] + "×" + n : OP_TEXT[op];
+        ops.appendChild(tag);
+      });
+      btn.append(icon, text, ops);
+      btn.addEventListener("click", () => { hint.textContent = "（演示）经 Host 打开文件：" + entry.path; });
+      li.appendChild(btn);
+      list.appendChild(li);
+    });
+  }
+
+  document.getElementById("btn-data").addEventListener("click", () => {
+    root.innerHTML = '<div class="mfs-head"><span class="mfs-title">本会话修改的文件</span><span class="mfs-count" id="count"></span></div><ul class="mfs-list" id="list"></ul>';
+    render(FILES);
+  });
+  document.getElementById("btn-empty").addEventListener("click", () => {
+    root.innerHTML = '<div class="mfs-head"><span class="mfs-title">本会话修改的文件</span><span class="mfs-count" id="count"></span></div><div class="mfs-state">本会话尚未修改任何文件</div>';
+  });
+  document.getElementById("btn-loading").addEventListener("click", () => {
+    root.innerHTML = '<div class="mfs-head"><span class="mfs-title">本会话修改的文件</span><span class="mfs-count" id="count"></span></div><div class="mfs-state">加载中…</div>';
+  });
+
+  render(FILES);
+</script>
+</body>
+</html>
