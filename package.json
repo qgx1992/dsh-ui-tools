@@ -1,6 +1,6 @@
 {
   "name": "dsh-ui-tools",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "DSH web UI 工具集插件：1) 输入框模型选择改为双按钮（供应商 + 模型两级联动，支持推理等级调节）；2) 侧边栏工作区折叠/展开全部。只动对应控件，不改 DSH 源码。",
   "type": "module",
   "main": "lib/index.js",
