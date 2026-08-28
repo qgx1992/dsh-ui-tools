@@ -5,3 +5,6 @@ node_modules/
 
 # 本机开发指南，默认不推送（仅本地保留，供会话代理读取）
 AGENT.md
+
+# 视觉工具产物（临时裁剪/标注图，不推送）
+.dsh-vision-router/
