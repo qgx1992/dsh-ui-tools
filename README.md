@@ -17,11 +17,11 @@ DSH Web 插件：四个 UI 工具合并成一个包，只动对应控件，不�
 
 在侧边栏**工作区列表下方**渲染「折叠全部 / 展开全部」工具条，一键折叠/展开所有工作区分组（纯 slot 渲染 + CSS 对齐，不搬动 DOM）。
 
-## 功能三：会话主选项卡「修改的文件」（v0.2.0 新增）
+## 功能三：会话主选项卡「修改的文件」（v0.2.0 新增；v0.3.1 起兼容 DSH 0.1.2-alpha.1）
 
 在会话头部主选项卡区（**对话 / 轨迹**之后）新增第三个选项卡 **「修改的文件」**，列出**当前会话改动过的所有文件**：
 
-- 数据来自会话快照里的工具调用节点（`assistant.blocks` 的 `tool-call` + `tool-result` 的 call 头 + 运行中的 `runningCalls`）；
+- 数据来自会话内容的 **chat target**（`ChatSnapshot.legacy` 的 `nodes` + `runningCalls`，即内核 target 体系下的 `assistant.blocks` 的 `tool-call` + `tool-result` 的 call 头 + 运行中的 `runningCalls`）；
 - 只认会改动文件系统的工具（`edit` / `write` / `mkdir` / `delete` / `move` / `copy` / `rename` 等），从 `argsRaw` JSON 里提取路径并去重（统一分隔符 + 小写，兼容 Windows 大小写不敏感）；
 - 按工作区相对路径展示，文件名 + 上级目录两行，右侧带操作徽标（编辑 / 写入 / 删除…，含次数）；
 - **点击文件名经 Host 打开**该文件（复用官方 `workspaces.openPath` + `resolveWorkspacePath` 逻辑）；
@@ -45,14 +45,15 @@ DSH Web 插件：四个 UI 工具合并成一个包，只动对应控件，不�
 - 本插件通过 `modelDirectories` 服务读取同一份模型目录（groups = 供应商分组），注册到 `conversation.input.right`（list slot）追加双按钮；
 - 选择模型/推理等级时调用官方 `directory.select(...)`，官方 store 同步更新，输入框状态与原生一致；
 - 折叠条注册到 `sidebar.footer.action`——官方渲染位置就是 footer 顶部、紧贴工作区列表正下方，用 CSS（对齐 `--dsh-session-list-edge-inset` 内边距）贴合列表即可，**不搬动 DOM**。搬动 slot 渲染出来的节点会与框架重渲染互相触发，导致渲染进程 100% CPU 卡死（v0.1.0 全局观察器、v0.1.2 收窄观察器均因此卡死；v0.1.3 起彻底不搬）。
-- 修改的文件 tab 注册进 `conversation.view`（见功能三）。
+- 修改的文件 tab 注册进 `conversation.view`；节点数据经 `ctx.uiConversation.binding(...).target("chat")` 读 chat target，并通过 `ctx.uiSession.provide` 暴露 `useModifiedFiles` 标准 hook 给视图消费（与官方「对话」/「轨迹」同构）。
 - 工作区徽章注册进 `conversation.session.header.actions`（见功能四）。
 
 四个功能各自独立命名空间（locale / slot id / data-* 前缀），互不干扰。
 
 ## 变更记录
 
-- **v0.3.0（本次）**：新增功能四「会话标题旁工作区徽章」——注册进官方 `conversation.session.header.actions` 增量 list 槽，在会话页标题右侧显示所属工作区名，纯 slot 渲染不改源码。
+- **v0.3.1（本次）**：兼容 DSH 0.1.2-alpha.1 内核——该内核把会话内容迁到 target 体系，`useSession` 不再提供 `nodes`/`runningCalls`；功能三「修改的文件」改经 `ctx.uiConversation.binding(...).target("chat")` 读 `ChatSnapshot.legacy` 取数，并注册 `useModifiedFiles` 标准 hook，写法与官方 `dsh-client-ui-chat` 同构。其余功能所用槽位/服务在内核中未变。
+- **v0.3.0**：新增功能四「会话标题旁工作区徽章」——注册进官方 `conversation.session.header.actions` 增量 list 槽，在会话页标题右侧显示所属工作区名，纯 slot 渲染不改源码。
 - **v0.2.0**：新增功能三「修改的文件」选项卡——注册进官方 `conversation.view` 开放槽，会话头部主选项卡区在「对话 / 轨迹」之后多出「修改的文件」，列出本会话改过的所有文件，点击经 Host 打开。
 - **v0.1.4（2026-08-27）**：解决与余额插件（dsh-cost-meter）共用 `sidebar.footer.action` 时的同行冲突——纯 CSS 让容器换行、工具条占满整行，自动排到余额下方自己的行。
 - **v0.1.3（2026-08-27）**：彻底放弃搬动 DOM——v0.1.2 的收窄观察器方案实测仍卡死（搬动 slot 节点与框架互搏）。改为纯 slot 渲染（工具条即官方 `sidebar.footer.action` 位置，紧贴工作区列表下方）+ CSS 对齐列表内边距。
@@ -91,4 +92,4 @@ dsh plugin --profile web add github:qgx1992/dsh-ui-tools
 
 - 输入框里输 `/model` 弹出的命令面板选择器走的是另一套 popupSelect 组件，本插件未涉及。
 - 侧边栏折叠条只影响工作区分组展开状态，不改变其他侧边栏 UI。
-- 「修改的文件」tab 只从会话快照里已固化的工具调用节点提取路径：运行中、以及被会话窗口截断（历史更早）的工具调用可能暂时缺失；读取（read/glob/grep）等只读工具不会计入修改列表。
+- 「修改的文件」tab 只从 chat target 已固化的工具调用节点提取路径：运行中、以及被会话窗口截断（历史更早）的工具调用可能暂时缺失；读取（read/glob/grep）等只读工具不会计入修改列表。
