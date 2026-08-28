@@ -52,7 +52,8 @@ DSH Web 插件：四个 UI 工具合并成一个包，只动对应控件，不�
 
 ## 变更记录
 
-- **v0.3.2（本次）**：修复 DSH 0.1.2-alpha.1 上的加载失败（`Failed to load plugins` / `client-modules: require(...) missed the module table`）——client bundle 顶部 `require("@deepseek-ai/dsh-client-runtime/client")` 需在新内核的 client 模块表里登记：`package.json` 的 `dsh.client.inject` 由空补为 `["@deepseek-ai/dsh-client-runtime"]`，并补 `peerDependencies`（`@deepseek-ai/dsh-client-runtime` / `react`，写法同 dsh-pet）。旧内核宽容、新内核严格。
+- **v0.3.3（本次）**：真正修复 DSH 0.1.2-alpha.1 上的加载失败（`Failed to load plugins` / `client-modules: require(...) missed the module table`）——client bundle **不再 require `@deepseek-ai/dsh-client-runtime/client`**：`resolveWorkspacePath` 按官方 `dsh-client-ui-chat` 的做法**内联进 bundle**，空快照 `MFS_EMPTY_CHAT` 代替 `EMPTY_CHAT_SNAPSHOT`。该内核的 client 模块表严格校验，runtime 未必是 profile 的 graph 行，v0.3.2 用 `dsh.client.inject` 登记的方案实测不生效（已回退）。
+- **v0.3.2**：尝试用 `package.json` 的 `dsh.client.inject` 把 `@deepseek-ai/dsh-client-runtime` 登记进 client 模块表以解决加载失败，实测在 0.1.2-alpha.1 上不生效（runtime 非 graph 行时 inject 是 no-op），已被 v0.3.3 取代。
 - **v0.3.1**：兼容 DSH 0.1.2-alpha.1 内核——该内核把会话内容迁到 target 体系，`useSession` 不再提供 `nodes`/`runningCalls`；功能三「修改的文件」改经 `ctx.uiConversation.binding(...).target("chat")` 读 `ChatSnapshot.legacy` 取数，并注册 `useModifiedFiles` 标准 hook，写法与官方 `dsh-client-ui-chat` 同构。其余功能所用槽位/服务在内核中未变。
 - **v0.3.0**：新增功能四「会话标题旁工作区徽章」——注册进官方 `conversation.session.header.actions` 增量 list 槽，在会话页标题右侧显示所属工作区名，纯 slot 渲染不改源码。
 - **v0.2.0**：新增功能三「修改的文件」选项卡——注册进官方 `conversation.view` 开放槽，会话头部主选项卡区在「对话 / 轨迹」之后多出「修改的文件」，列出本会话改过的所有文件，点击经 Host 打开。
