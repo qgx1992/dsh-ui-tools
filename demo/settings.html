@@ -21,7 +21,7 @@
   h1 { font-size: 16px; margin: 0 0 4px; }
   .sub { font-size: 12px; color: var(--dsw-alias-label-secondary); margin-bottom: 24px; line-height: 20px; }
   .mock { background: var(--dsw-alias-bg-base); border: 1px solid var(--dsw-alias-border-l2); border-radius: 12px; box-shadow: var(--dsw-shadow-lv3); overflow: hidden; max-width: 640px; }
-  .settings-shell { display: flex; min-height: 360px; }
+  .settings-shell { display: flex; min-height: 300px; }
   .nav { width: 150px; flex: none; border-right: 1px solid var(--dsw-alias-border-l1); padding: 10px 8px; font-size: 12px; display: flex; flex-direction: column; gap: 2px; }
   .nav-item { padding: 6px 10px; border-radius: 6px; color: var(--dsw-alias-label-secondary); }
   .nav-item.active { background: color-mix(in srgb, var(--dsw-alias-brand-primary, #4176e6) 10%, transparent); color: var(--dsw-alias-brand-text, var(--dsw-alias-brand-primary, #4176e6)); font-weight: 500; }
@@ -73,84 +73,11 @@
     accent-color: var(--dsw-alias-brand-primary, #4176e6);
     cursor: pointer;
   }
-  [data-set-root] .set-hint {
-    margin: 0;
-    color: var(--dsw-alias-label-caption, #8a919e);
-    font-size: 12px;
-    line-height: 18px;
-  }
-  [data-set-root] .set-quickbar {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    min-width: 0;
-  }
-  [data-set-root] .set-textarea {
-    width: 100%;
-    box-sizing: border-box;
-    min-height: 96px;
-    padding: 8px 10px;
-    border: 1px solid var(--dsw-alias-border-l2, rgba(0,0,0,.08));
-    border-radius: 8px;
-    background: transparent;
-    color: var(--dsw-alias-label-primary, #1f2329);
-    font: inherit;
-    font-size: 12px;
-    font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
-    line-height: 20px;
-    resize: vertical;
-    outline: none;
-  }
-  [data-set-root] .set-textarea:focus {
-    border-color: var(--dsw-alias-brand-primary, #4176e6);
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--dsw-alias-brand-primary, #4176e6) 25%, transparent);
-  }
-  [data-set-root] .set-quickbar-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-  [data-set-root] .set-btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    height: 28px;
-    padding: 0 12px;
-    border: 1px solid var(--dsw-alias-border-l2, rgba(0,0,0,.1));
-    border-radius: 8px;
-    background: transparent;
-    color: var(--dsw-alias-label-primary, #1f2329);
-    font: inherit;
-    font-size: 12px;
-    font-weight: 500;
-    line-height: 1;
-    cursor: pointer;
-    transition: background .12s ease, border-color .12s ease;
-  }
-  [data-set-root] .set-btn:hover,
-  [data-set-root] .set-btn:focus-visible {
-    border-color: var(--dsw-alias-brand-primary, #4176e6);
-    background: color-mix(in srgb, var(--dsw-alias-brand-primary, #4176e6) 8%, transparent);
-  }
-  [data-set-root] .set-btn-primary {
-    border-color: transparent;
-    background: var(--dsw-alias-brand-primary, #4176e6);
-    color: var(--dsw-alias-brand-on, #fff);
-  }
-  [data-set-root] .set-btn-primary:hover,
-  [data-set-root] .set-btn-primary:focus-visible {
-    border-color: transparent;
-    background: color-mix(in srgb, var(--dsw-alias-brand-primary, #4176e6) 88%, #fff);
-  }
-  [data-set-root] .set-btn:disabled {
-    opacity: .65;
-    cursor: default;
-  }
 </style>
 </head>
 <body>
   <h1>插件设置页「DSH UI 工具」（静态预览）</h1>
-  <div class="sub">模拟官方设置中心：导航新增「DSH UI 工具」页（v0.4.0 功能六），集中开关六个功能并编辑快捷命令列表。</div>
+  <div class="sub">模拟官方设置中心：导航新增「DSH UI 工具」页（v0.4.0 新增；v0.4.1 移除快捷命令条后仅剩布局偏好）。</div>
 
   <div class="mock">
     <div class="settings-shell">
@@ -163,24 +90,6 @@
       <div class="content">
         <!-- 插件注入的设置页主体 -->
         <div data-set-root class="set-root">
-          <div class="set-group">
-            <div class="set-group-title">快捷命令条</div>
-            <label class="set-row" data-set-row>
-              <span class="set-row-label">在输入框下方显示快捷命令</span>
-              <input type="checkbox" class="set-toggle" checked>
-            </label>
-            <p class="set-hint">点击命令 = 填入输入框并立即发送</p>
-            <div data-set-quickbar class="set-quickbar">
-              <textarea class="set-textarea" rows="4" spellcheck="false">/plan on||/plan on
-/plan off||/plan off
-/model||/model
-按标签注释||/review</textarea>
-              <div class="set-quickbar-row">
-                <button type="button" class="set-btn set-btn-primary">保存命令</button>
-                <button type="button" class="set-btn">恢复默认命令</button>
-              </div>
-            </div>
-          </div>
           <div class="set-group">
             <div class="set-group-title">布局偏好</div>
             <label class="set-row" data-set-row>
@@ -199,12 +108,12 @@
         </div>
       </div>
     </div>
-    <div class="bar">↑ 设置中心里的「DSH UI 工具」页；开关与命令列表经 localStorage（dsh-ui-tools:prefs:v1）持久化</div>
+    <div class="bar">↑ 设置中心里的「DSH UI 工具」页；开关经 localStorage（dsh-ui-tools:prefs:v1）持久化</div>
   </div>
 
   <div class="hint" style="font-size:12px;color:var(--dsw-alias-label-tertiary);margin-top:14px;line-height:20px">
     注：静态预览为手写 HTML 样式视图；真实注册在官方 <code>settings.section</code> 槽（root 作用域 list，id <code>dsh-ui-tools</code>、order 100），
-    保存按钮把文本区按「标签||命令」逐行解析后写入偏好仓库。
+    开关写入偏好仓库后由各功能组件即时生效。
   </div>
 </body>
 </html>

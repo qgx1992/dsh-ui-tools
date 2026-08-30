@@ -1,6 +1,6 @@
 # dsh-ui-tools
 
-DSH Web 插件：六个 UI 工具合并成一个包，只动对应控件，不改 DSH 任何一行源码。
+DSH Web 插件：五个 UI 工具合并成一个包，只动对应控件，不改 DSH 任何一行源码。
 
 ## 功能一：模型选择双按钮（原 dsh-model-select-style）
 
@@ -39,21 +39,10 @@ DSH Web 插件：六个 UI 工具合并成一个包，只动对应控件，不�
 
 **实现原理**：本功能注册进官方**纯增量 list 槽 `conversation.session.header.actions`**（session 作用域）——它是头部标题 cluster 内的动作行，位于面包屑标题右侧，正好是「标题旁」。list 槽是加性的（绝不替换标题、无占用冲突，当前该槽无其他插件占用），我们用负数 `order: -100` 让徽章排在其它交互动作之前、紧贴标题。纯 slot 渲染，不搬 DOM、不改源码。
 
-## 功能五：composer 快捷命令条（v0.4.0 新增）
+## 功能五：插件设置页「DSH UI 工具」（v0.4.0 新增；v0.4.1 移除快捷命令条）
 
-在输入框**下方**渲染一排常用命令 chip（如 `/plan on`、`/plan off`、`/model`），**点击 = 填入草稿并立即发送**：
+在官方**设置中心**新增一个「DSH UI 工具」页面，集中控制本包功能的偏好：
 
-- 数据：会话标准 kit 自带 `inputActions`（`setDraft` + `submit`），不引入任何额外数据链路；
-- 启停与命令列表可在设置页（功能六）配置，命令格式 `标签||命令`，每行一条；
-- 与官方 stats 行（`order: 0`）共存，本条目用 `order: 10` 排在后面；与当前草稿匹配的 chip 带高亮态（`aria-pressed`）。
-
-**实现原理**：注册进官方加点性 list 槽 **`conversation.composer.dock`**（session 作用域，渲染在 composer 卡片下方）——与官方「统计」行同一槽位，纯增量不替换任何官方控件。点击经 `inputActions.setDraft(text)` 整草稿替换 + `inputActions.submit()` 提交，提交决策（锁定/忙碌/审批中）完全交给官方输入状态机，插件不做任何预判。
-
-## 功能六：插件设置页「DSH UI 工具」（v0.4.0 新增）
-
-在官方**设置中心**新增一个「DSH UI 工具」页面，集中控制本包所有功能的偏好：
-
-- **快捷命令条**：显示/隐藏开关 + 命令列表编辑器（每行 `标签||命令`）+ 恢复默认；
 - **布局偏好**：工作区徽章开关、「修改的文件」紧凑单行显示、启动时默认折叠所有工作区分组；
 - 偏好经 **localStorage** 持久化（`dsh-ui-tools:prefs:v1`），刷新/重启后保持。
 
@@ -69,14 +58,14 @@ DSH Web 插件：六个 UI 工具合并成一个包，只动对应控件，不�
 - 折叠条注册到 `sidebar.footer.action`——官方渲染位置就是 footer 顶部、紧贴工作区列表正下方，用 CSS（对齐 `--dsh-session-list-edge-inset` 内边距）贴合列表即可，**不搬动 DOM**。搬动 slot 渲染出来的节点会与框架重渲染互相触发，导致渲染进程 100% CPU 卡死（v0.1.0 全局观察器、v0.1.2 收窄观察器均因此卡死；v0.1.3 起彻底不搬）。
 - 修改的文件 tab 注册进 `conversation.view`；节点数据经 `ctx.uiConversation.binding(...).target("chat")` 读 chat target，并通过 `ctx.uiSession.provide` 暴露 `useModifiedFiles` 标准 hook 给视图消费（与官方「对话」/「轨迹」同构）。
 - 工作区徽章注册进 `conversation.session.header.actions`（见功能四）。
-- 快捷命令条注册进 `conversation.composer.dock`（见功能五），点击经标准 kit 的 `inputActions.setDraft` + `submit`。
-- 设置页注册进 `settings.section`（见功能六）；所有偏好走 apply 期创建的一次性 localStorage 偏好仓库，组件经 `useSyncExternalStore` 订阅。
+- 设置页注册进 `settings.section`（见功能五）；所有偏好走 apply 期创建的一次性 localStorage 偏好仓库，组件经 `useSyncExternalStore` 订阅。
 
-六个功能各自独立命名空间（locale / slot id / data-* 前缀），互不干扰。
+五个功能各自独立命名空间（locale / slot id / data-* 前缀），互不干扰。
 
 ## 变更记录
 
-- **v0.4.0（本次）**：新增功能五「composer 快捷命令条」——注册进官方 `conversation.composer.dock`（list 加性，order 10），输入框下方一排常用命令 chip，点击 = `inputActions.setDraft` + `submit` 填入并发送，命令列表可在设置页自定义；新增功能六「DSH UI 工具」设置页——注册进官方 `settings.section`（root list 槽，id `dsh-ui-tools`、order 100），集中开关四个既有功能 + 快捷命令条，「修改的文件」新增紧凑单行模式、侧边栏新增「启动默认折叠」偏好；全部偏好经 localStorage 持久化（`dsh-ui-tools:prefs:v1`，沿用 `dsh-better-sidebar` 同款社区惯例；官方 settings 命名空间需 host 侧注册 schema，本插件保持纯浏览器故不采用）。
+- **v0.4.1（本次）**：按反馈移除 v0.4.0 的「composer 快捷命令条」——删除 `conversation.composer.dock` 注册、QCB 命名空间/CSS、偏好字段 `quickbarEnabled`/`quickbarItems` 及设置页快捷条编辑器；「DSH UI 工具」设置页保留（仅布局偏好：徽章开关 / 启动默认折叠 / 修改文件紧凑显示），插件回归五功能。
+- **v0.4.0（历史）**：新增「composer 快捷命令条」——注册进官方 `conversation.composer.dock`（list 加性，order 10），输入框下方一排常用命令 chip，点击 = `inputActions.setDraft` + `submit` 填入并发送，命令列表可在设置页自定义；新增「DSH UI 工具」设置页——注册进官方 `settings.section`（root list 槽，id `dsh-ui-tools`、order 100），集中开关四个既有功能 + 快捷命令条，「修改的文件」新增紧凑单行模式、侧边栏新增「启动默认折叠」偏好；全部偏好经 localStorage 持久化（`dsh-ui-tools:prefs:v1`，沿用 `dsh-better-sidebar` 同款社区惯例；官方 settings 命名空间需 host 侧注册 schema，本插件保持纯浏览器故不采用）。v0.4.1 起快捷命令条已移除。
 - **v0.3.4（历史）**：修复 DSH 0.1.2-alpha.1 上「折叠/展开」工具条错位（与余额挤在一行、「展开全部」被裁剪）——旧 CSS 里硬编码的侧边栏哈希类名 `.hHd-Xa_footerActions` 已失效，且 renderer 给 slot 套的 `div[data-slot]` 是 `display:contents`（不参与布局），原 `:has` 换行规则命中也无效。改用**哈希无关**的 `[class*="footerActions"]{flex-wrap:wrap !important}` 命中真实布局容器，内核升级不再失效。
 - **v0.3.3**：真正修复 DSH 0.1.2-alpha.1 上的加载失败（`Failed to load plugins` / `client-modules: require(...) missed the module table`）——client bundle **不再 require `@deepseek-ai/dsh-client-runtime/client`**：`resolveWorkspacePath` 按官方 `dsh-client-ui-chat` 的做法**内联进 bundle**，空快照 `MFS_EMPTY_CHAT` 代替 `EMPTY_CHAT_SNAPSHOT`。该内核的 client 模块表严格校验，runtime 未必是 profile 的 graph 行，v0.3.2 用 `dsh.client.inject` 登记的方案实测不生效（已回退）。
 - **v0.3.2**：尝试用 `package.json` 的 `dsh.client.inject` 把 `@deepseek-ai/dsh-client-runtime` 登记进 client 模块表以解决加载失败，实测在 0.1.2-alpha.1 上不生效（runtime 非 graph 行时 inject 是 no-op），已被 v0.3.3 取代。
@@ -113,7 +102,7 @@ dsh plugin --profile web add github:qgx1992/dsh-ui-tools
   - id: ui-tools
     disabled: true
   ```
-- 设置 → 插件 中的停用同样有效（六个功能同时关闭）。
+- 设置 → 插件 中的停用同样有效（五个功能同时关闭）。
 - 彻底卸载：从 bundles 与 dependencies 移除条目、删除 node_modules 内链接与本地插件目录。
 
 ## 明确不覆盖的范围
@@ -121,5 +110,4 @@ dsh plugin --profile web add github:qgx1992/dsh-ui-tools
 - 输入框里输 `/model` 弹出的命令面板选择器走的是另一套 popupSelect 组件，本插件未涉及。
 - 侧边栏折叠条只影响工作区分组展开状态，不改变其他侧边栏 UI。
 - 「修改的文件」tab 只从 chat target 已固化的工具调用节点提取路径：运行中、以及被会话窗口截断（历史更早）的工具调用可能暂时缺失；读取（read/glob/grep）等只读工具不会计入修改列表。
-- 快捷命令条点击 = 填入草稿并立即发送；只填入不发送的情况暂不支持，可发送前在输入框撤回。
 - 偏好只存当前浏览器 localStorage，不会跨浏览器/跨设备同步。
