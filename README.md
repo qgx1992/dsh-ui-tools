@@ -17,7 +17,9 @@ DSH Web 插件：五个 UI 工具合并成一个包，只动对应控件，不�
 
 在侧边栏**工作区列表下方**渲染「折叠全部 / 展开全部」工具条，一键折叠/展开所有工作区分组（纯 slot 渲染 + CSS 对齐，不搬动 DOM）。
 
-## 功能三：会话主选项卡「修改的文件」（v0.2.0 新增；v0.3.1 起兼容 DSH 0.1.2-alpha.1）
+## 功能三：会话主选项卡「修改的文件」（v0.2.0 新增；v0.3.1 起兼容 DSH 0.1.2-alpha.1；v0.4.2 起跨内核自适应）
+
+> **内核要求**：需要 DSH `0.1.2-alpha.1+`。在 `0.1.1-rc.x` 上本功能**自动缺席**（不报错、不弹横幅），其余四个功能照常可用——见[内核兼容矩阵](#内核兼容矩阵)。
 
 在会话头部主选项卡区（**对话 / 轨迹**之后）新增第三个选项卡 **「修改的文件」**，列出**当前会话改动过的所有文件**：
 
@@ -44,7 +46,8 @@ DSH Web 插件：五个 UI 工具合并成一个包，只动对应控件，不�
 在官方**设置中心**新增一个「DSH UI 工具」页面，集中控制本包功能的偏好：
 
 - **布局偏好**：工作区徽章开关、「修改的文件」紧凑单行显示、启动时默认折叠所有工作区分组；
-- 偏好经 **localStorage** 持久化（`dsh-ui-tools:prefs:v1`），刷新/重启后保持。
+- 偏好经 **localStorage** 持久化（`dsh-ui-tools:prefs:v1`），刷新/重启后保持；
+- **能力感知（v0.4.2）**：功能三依赖的内核服务不可用时（`0.1.1-rc.x`），「修改的文件」那一行开关**灰显**并在标签下提示「需内核 0.1.2-alpha.1+」，不会出现一个点了没用的开关。可用性由 `alphaFeatures` 子 fiber 实际激活来置位（比在 apply 期一次性探测更可靠：官方 provider 可能比本插件晚激活）。
 
 > 存储说明：官方 settings 命名空间需要 host 侧 `ctx.settings.register(ns, schema)` 声明 schema 才能持久化（参考 `ui-theme/src/index.ts`）；本插件刻意保持纯浏览器（`lib/index.js` 空入口、不引入 host 依赖与 schema 校验风险），故沿用浏览器插件社区惯例（同款 `dsh-better-sidebar`）的 localStorage。偏好仅当前浏览器生效；如需跨端/跨浏览器同步，可后续增加 host 半部迁移到 settings 文档。
 
@@ -57,14 +60,36 @@ DSH Web 插件：五个 UI 工具合并成一个包，只动对应控件，不�
 - 选择模型/推理等级时调用官方 `directory.select(...)`，官方 store 同步更新，输入框状态与原生一致；
 - 折叠条注册到 `sidebar.footer.action`——官方渲染位置就是 footer 顶部、紧贴工作区列表正下方，用 CSS（对齐 `--dsh-session-list-edge-inset` 内边距）贴合列表即可，**不搬动 DOM**。搬动 slot 渲染出来的节点会与框架重渲染互相触发，导致渲染进程 100% CPU 卡死（v0.1.0 全局观察器、v0.1.2 收窄观察器均因此卡死；v0.1.3 起彻底不搬）。
 - 修改的文件 tab 注册进 `conversation.view`；节点数据经 `ctx.uiConversation.binding(...).target("chat")` 读 chat target，并通过 `ctx.uiSession.provide` 暴露 `useModifiedFiles` 标准 hook 给视图消费（与官方「对话」/「轨迹」同构）。
+- **跨内核分层（v0.4.2）**：`uiConversation` / `uiSession` 是 `0.1.2-alpha.1` 才引入的服务，旧内核 store 里没有它们的提供方。因此这两个**硬依赖不写在 loader entry 的 `inject` 上**（写了会让整个 entry 停在 PENDING，被 boot 末尾只遍历 `ctx.loader.entries()` 的审计判为失败 → `web boot: 1 entry did not activate` + `Failed to load plugins` 横幅，五个功能一起丢），而是收进 `ctx.plugin(alphaFeatures)` **子 fiber**：入口层只声明五个跨内核服务，功能三整段注册（chat target 取数、`useModifiedFiles` hook、`conversation.view` 注册、MFS 文案）搬进子 fiber，`alphaFeatures.inject = ["uiConversation", "uiSession"]`。旧内核上该子 fiber 停在 PENDING——cordis 不执行其函数体、不注册其 effect、也不计入审计，服务（哪怕延后出现）就绪时自动激活，并随 entry dispose 一并释放。渲染方式完全不变（纯 slot，无观察器/定时器）。
+
 - 工作区徽章注册进 `conversation.session.header.actions`（见功能四）。
 - 设置页注册进 `settings.section`（见功能五）；所有偏好走 apply 期创建的一次性 localStorage 偏好仓库，组件经 `useSyncExternalStore` 订阅。
 
 五个功能各自独立命名空间（locale / slot id / data-* 前缀），互不干扰。
 
+## 内核兼容矩阵
+
+| DSH 内核 | 入口 fiber | `alphaFeatures` 子 fiber | boot 审计 | 横幅 | 可用功能 |
+|---|---|---|---|---|---|
+| `0.1.2-alpha.1` 及更新 | active | active | pass | 无 | 全部 5 项 |
+| `0.1.1-rc.1` / `0.1.1-rc.2` | active | pending（静默） | pass | 无 | 1 / 2 / 4 / 5（功能三缺席，设置页对应开关灰显） |
+
+> 本包在 `0.1.2-alpha.3` 上验证全量功能；旧内核降级经 `node tools/compat-check.mjs`（真实 cordis）断言。
+
+## 自检
+
+```bash
+node --check lib/client.js       # 语法
+node tools/compat-check.mjs      # 内核自适应回归（真实 cordis，三场景断言）
+# 或一次跑完：npm run check
+```
+
+`tools/compat-check.mjs` 不开浏览器也不重启服务：它从本机已装内核副本里加载 cordis，搭一个最小宿主把 `lib/client.js` 的 entry 挂上去，在「旧内核 / 新内核 / 服务后到」三种场景下复刻 boot 的审计口径（只看 loader entry fiber 是否停在 PENDING），断言入口激活、子 fiber 状态、各槽位注册、`useModifiedFiles` 取数与设置页能力位。
+
 ## 变更记录
 
-- **v0.4.1（本次）**：按反馈移除 v0.4.0 的「composer 快捷命令条」——删除 `conversation.composer.dock` 注册、QCB 命名空间/CSS、偏好字段 `quickbarEnabled`/`quickbarItems` 及设置页快捷条编辑器；「DSH UI 工具」设置页保留（仅布局偏好：徽章开关 / 启动默认折叠 / 修改文件紧凑显示），插件回归五功能。
+- **v0.4.2（本次）**：内核版本自适应（软依赖 + 子 fiber 隔离），修复「切到 0.1.1-rc.x 旧内核后 Web UI 顶部 `Failed to load plugins` / `web boot: 1 entry did not activate` 横幅、桌面端反复重载」——根因是入口 `inject` 硬声明了 `0.1.2-alpha.1` 才有的 `uiConversation` / `uiSession`，旧内核无提供方 → 整个 entry 停在 PENDING 被 boot 审计判失败，五个功能一起丢。现在入口只声明五个跨内核服务，功能三的整段注册搬进 `ctx.plugin(alphaFeatures)` 子 fiber（`alphaFeatures.inject` 承载这两个硬依赖），旧内核上子 fiber 静默停在 PENDING、其余四项照常；另加能力探测（子 fiber 激活即置位 `capability.alphaApi`）+ 设置页灰显提示「需内核 0.1.2-alpha.1+」+ 关键调用点形状探测与 try/catch 降级；新增 `tools/compat-check.mjs` 无头回归（真实 cordis，三场景）与 `npm run check`。行为与验收见[内核兼容矩阵](#内核兼容矩阵)。
+- **v0.4.1（历史）**：按反馈移除 v0.4.0 的「composer 快捷命令条」——删除 `conversation.composer.dock` 注册、QCB 命名空间/CSS、偏好字段 `quickbarEnabled`/`quickbarItems` 及设置页快捷条编辑器；「DSH UI 工具」设置页保留（仅布局偏好：徽章开关 / 启动默认折叠 / 修改文件紧凑显示），插件回归五功能。
 - **v0.4.0（历史）**：新增「composer 快捷命令条」——注册进官方 `conversation.composer.dock`（list 加性，order 10），输入框下方一排常用命令 chip，点击 = `inputActions.setDraft` + `submit` 填入并发送，命令列表可在设置页自定义；新增「DSH UI 工具」设置页——注册进官方 `settings.section`（root list 槽，id `dsh-ui-tools`、order 100），集中开关四个既有功能 + 快捷命令条，「修改的文件」新增紧凑单行模式、侧边栏新增「启动默认折叠」偏好；全部偏好经 localStorage 持久化（`dsh-ui-tools:prefs:v1`，沿用 `dsh-better-sidebar` 同款社区惯例；官方 settings 命名空间需 host 侧注册 schema，本插件保持纯浏览器故不采用）。v0.4.1 起快捷命令条已移除。
 - **v0.3.4（历史）**：修复 DSH 0.1.2-alpha.1 上「折叠/展开」工具条错位（与余额挤在一行、「展开全部」被裁剪）——旧 CSS 里硬编码的侧边栏哈希类名 `.hHd-Xa_footerActions` 已失效，且 renderer 给 slot 套的 `div[data-slot]` 是 `display:contents`（不参与布局），原 `:has` 换行规则命中也无效。改用**哈希无关**的 `[class*="footerActions"]{flex-wrap:wrap !important}` 命中真实布局容器，内核升级不再失效。
 - **v0.3.3**：真正修复 DSH 0.1.2-alpha.1 上的加载失败（`Failed to load plugins` / `client-modules: require(...) missed the module table`）——client bundle **不再 require `@deepseek-ai/dsh-client-runtime/client`**：`resolveWorkspacePath` 按官方 `dsh-client-ui-chat` 的做法**内联进 bundle**，空快照 `MFS_EMPTY_CHAT` 代替 `EMPTY_CHAT_SNAPSHOT`。该内核的 client 模块表严格校验，runtime 未必是 profile 的 graph 行，v0.3.2 用 `dsh.client.inject` 登记的方案实测不生效（已回退）。

@@ -73,11 +73,56 @@
     accent-color: var(--dsw-alias-brand-primary, #4176e6);
     cursor: pointer;
   }
+  /* v0.4.2 能力缺席灰显态（旧内核上功能三不可用） */
+  [data-set-root] .set-row-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+  [data-set-root] .set-row[data-set-disabled="true"] {
+    cursor: not-allowed;
+    opacity: .55;
+  }
+  [data-set-root] .set-row[data-set-disabled="true"]:hover {
+    background: var(--dsw-specific-surface-hover, rgba(127,127,127,.06));
+  }
+  [data-set-root] .set-row[data-set-disabled="true"] .set-toggle {
+    cursor: not-allowed;
+  }
+  [data-set-root] .set-row-hint {
+    color: var(--dsw-alias-label-tertiary, #a1a8b3);
+    font-size: 11px;
+    line-height: 16px;
+  }
+  .kernel-switch { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 0 0 18px; font-size: 12px; color: var(--dsw-alias-label-secondary); }
+  .kernel-switch button {
+    font: inherit;
+    padding: 4px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--dsw-alias-border-l2);
+    background: var(--dsw-alias-bg-base);
+    color: var(--dsw-alias-label-secondary);
+    cursor: pointer;
+  }
+  .kernel-switch button[aria-pressed="true"] {
+    border-color: var(--dsw-alias-brand-primary);
+    color: var(--dsw-alias-brand-text, var(--dsw-alias-brand-primary));
+    background: color-mix(in srgb, var(--dsw-alias-brand-primary, #4176e6) 10%, transparent);
+    font-weight: 500;
+  }
 </style>
 </head>
 <body>
   <h1>插件设置页「DSH UI 工具」（静态预览）</h1>
-  <div class="sub">模拟官方设置中心：导航新增「DSH UI 工具」页（v0.4.0 新增；v0.4.1 移除快捷命令条后仅剩布局偏好）。</div>
+  <div class="sub">模拟官方设置中心：导航新增「DSH UI 工具」页（v0.4.0 新增；v0.4.1 移除快捷命令条后仅剩布局偏好；v0.4.2 起按内核能力灰显）。</div>
+
+  <div class="kernel-switch">
+    <span>模拟内核：</span>
+    <button type="button" id="k-new" aria-pressed="true">0.1.2-alpha.3（target 体系齐备）</button>
+    <button type="button" id="k-old" aria-pressed="false">0.1.1-rc.2（无 uiConversation / uiSession）</button>
+    <span id="k-note">子 fiber ACTIVE → 功能三可用</span>
+  </div>
 
   <div class="mock">
     <div class="settings-shell">
@@ -93,16 +138,19 @@
           <div class="set-group">
             <div class="set-group-title">布局偏好</div>
             <label class="set-row" data-set-row>
-              <span class="set-row-label">会话标题旁显示工作区徽章</span>
+              <span class="set-row-text"><span class="set-row-label">会话标题旁显示工作区徽章</span></span>
               <input type="checkbox" class="set-toggle" checked>
             </label>
             <label class="set-row" data-set-row>
-              <span class="set-row-label">启动时默认折叠所有工作区分组</span>
+              <span class="set-row-text"><span class="set-row-label">启动时默认折叠所有工作区分组</span></span>
               <input type="checkbox" class="set-toggle">
             </label>
-            <label class="set-row" data-set-row>
-              <span class="set-row-label">「修改的文件」使用紧凑单行显示</span>
-              <input type="checkbox" class="set-toggle">
+            <label class="set-row" data-set-row id="row-mfs">
+              <span class="set-row-text">
+                <span class="set-row-label">「修改的文件」使用紧凑单行显示</span>
+                <span class="set-row-hint" id="mfs-hint" hidden>需内核 0.1.2-alpha.1+（当前内核没有会话 target 体系，该选项卡不可用）</span>
+              </span>
+              <input type="checkbox" class="set-toggle" id="mfs-toggle">
             </label>
           </div>
         </div>
@@ -113,7 +161,34 @@
 
   <div class="hint" style="font-size:12px;color:var(--dsw-alias-label-tertiary);margin-top:14px;line-height:20px">
     注：静态预览为手写 HTML 样式视图；真实注册在官方 <code>settings.section</code> 槽（root 作用域 list，id <code>dsh-ui-tools</code>、order 100），
-    开关写入偏好仓库后由各功能组件即时生效。
+    开关写入偏好仓库后由各功能组件即时生效。<br>
+    「修改的文件」那一行的灰显由 <code>capability.alphaApi</code> 决定：功能三的注册段收在 <code>alphaFeatures</code> 子 fiber 里，
+    旧内核（0.1.1-rc.x）没有 <code>uiConversation</code> / <code>uiSession</code> 的提供方 → 子 fiber 停在 PENDING →
+    能力位为假 → 该行灰显并提示所需内核，而不是留下一个点了没用的开关；其余四项功能不受影响，也不会有 Failed to load plugins 横幅。
   </div>
+
+<script>
+  // 切换「内核」只驱动灰显，等价于组件里 disabled: !cap.alphaApi 的两种取值。
+  const row = document.getElementById("row-mfs");
+  const hint = document.getElementById("mfs-hint");
+  const toggle = document.getElementById("mfs-toggle");
+  const note = document.getElementById("k-note");
+  const kNew = document.getElementById("k-new");
+  const kOld = document.getElementById("k-old");
+  const setAlpha = (alphaApi) => {
+    row.dataset.setDisabled = alphaApi ? "false" : "true";
+    toggle.disabled = !alphaApi;
+    toggle.setAttribute("aria-disabled", String(!alphaApi));
+    hint.hidden = alphaApi;
+    kNew.setAttribute("aria-pressed", String(alphaApi));
+    kOld.setAttribute("aria-pressed", String(!alphaApi));
+    note.textContent = alphaApi
+      ? "子 fiber ACTIVE → 功能三可用"
+      : "子 fiber PENDING（静默）→ 功能三缺席，其余四项照常";
+  };
+  kNew.addEventListener("click", () => setAlpha(true));
+  kOld.addEventListener("click", () => setAlpha(false));
+  setAlpha(true);
+</script>
 </body>
 </html>
