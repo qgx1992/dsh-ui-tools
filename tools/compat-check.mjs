@@ -157,12 +157,29 @@ const FAKE_CWD = "C:/ws/demo";
 const FAKE_CHAT_SNAPSHOT = {
 	legacy: {
 		nodes: [
-			{ kind: "assistant", blocks: [{ kind: "tool-call", name: "edit", argsRaw: JSON.stringify({ file_path: "src/a.ts" }) }] },
+			{ kind: "assistant", blocks: [
+				{ kind: "tool-call", name: "edit", argsRaw: JSON.stringify({ file_path: "src/a.ts" }) },
+				{ kind: "tool-call", name: "run_code", argsRaw: JSON.stringify({ code: `const r = await tools.write({ file_path: "src/c.ts", content: "x" });
+await tools.edit({ file_path: "src/d.ts", old_string: "a", new_string: "b" });
+await tools.mkdir({ dirs: ["src/nested", "src/empty"] });` }) }
+			] },
 			{ kind: "tool-result", call: { name: "write", argsRaw: JSON.stringify({ file_path: "src/b.ts" }) } }
 		],
 		runningCalls: []
 	}
 };
+
+/** 从 bundle 源码截取 MFS 提取段，直接测 collectModifiedFiles（不经 VDOM/hooks）。
+ *  与 loadClientBundle 同一份 BUNDLE 源码，保证测的就是被测 bundle。 */
+function loadMfsCollector() {
+	const src = fs.readFileSync(BUNDLE, "utf8");
+	const si = src.indexOf("/* 会改动文件系统的工具");
+	const ei = src.indexOf("\t\t/** 展示用相对路径");
+	if (si < 0 || ei < 0) throw new Error("MFS 提取段定位失败");
+	const depSrc = src.slice(si, ei);
+	// eslint-disable-next-line no-new-func
+	return new Function(depSrc + "\nreturn collectModifiedFiles;")();
+}
 
 /**
  * 造一个「内核」插件：把插件入口 inject 需要的服务 provide 出来。
@@ -344,6 +361,16 @@ section("B. 新内核（两服务齐备）：五个功能全部生效");
 
 	const hook = env.ledger.provided[0]?.resolve({ sessionId: "s1" })?.hooks?.modifiedFiles;
 	check("useModifiedFiles 读到 chat target 快照", hook?.getSnapshot() === FAKE_CHAT_SNAPSHOT);
+
+	// v0.4.3：run_code 内嵌工具调用的路径也要被提取（tools.write/edit/mkdir…）
+	{
+		const collect = loadMfsCollector();
+		const files = collect(FAKE_CHAT_SNAPSHOT.legacy?.nodes ?? [], FAKE_CHAT_SNAPSHOT.legacy?.runningCalls ?? []);
+		const paths = files.map((f) => f.path).sort();
+		check("run_code 内嵌 write/edit/mkdir 路径被提取",
+			["src/a.ts", "src/b.ts", "src/c.ts", "src/d.ts", "src/nested", "src/empty"].every((p) => paths.includes(p)),
+			paths.join(", "));
+	}
 
 	const setFace = faceAt(env.seats, "settings.section");
 	check("capability.alphaApi = true → 开关可用", setFace?.capability?.getSnapshot().alphaApi === true);

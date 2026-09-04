@@ -25,6 +25,7 @@ DSH Web 插件：五个 UI 工具合并成一个包，只动对应控件，不�
 
 - 数据来自会话内容的 **chat target**（`ChatSnapshot.legacy` 的 `nodes` + `runningCalls`，即内核 target 体系下的 `assistant.blocks` 的 `tool-call` + `tool-result` 的 call 头 + 运行中的 `runningCalls`）；
 - 只认会改动文件系统的工具（`edit` / `write` / `mkdir` / `delete` / `move` / `copy` / `rename` 等），从 `argsRaw` JSON 里提取路径并去重（统一分隔符 + 小写，兼容 Windows 大小写不敏感）；
+- **run_code 支持（v0.4.3）**：当前 DSH agent 环境的所有工具调用都包在 `run_code` 里（工具名永远是 `run_code`、路径藏在 `code` 字符串中）。本功能从 `code` 里静态提取 `tools.edit/write/mkdir/move/copy/delete…` 内嵌调用的字面量路径（含字符串数组，如 `mkdir({ dirs: [...] })`），复用同一去重/徽标/打开链路。只认**字面量字符串路径**；模板串/变量拼接（`path + "/x"`）无法静态解析、shell 级写操作（pwsh 的 `Set-Content` / 重定向、gitbash 等）不可靠解析——这三类不计入；
 - 按工作区相对路径展示，文件名 + 上级目录两行，右侧带操作徽标（编辑 / 写入 / 删除…，含次数）；
 - **点击文件名经 Host 打开**该文件（复用官方 `workspaces.openPath` + `resolveWorkspacePath` 逻辑）；
 - 空会话显示占位文案，加载中显示 loading。
@@ -88,7 +89,8 @@ node tools/compat-check.mjs      # 内核自适应回归（真实 cordis，三�
 
 ## 变更记录
 
-- **v0.4.2（本次）**：内核版本自适应（软依赖 + 子 fiber 隔离），修复「切到 0.1.1-rc.x 旧内核后 Web UI 顶部 `Failed to load plugins` / `web boot: 1 entry did not activate` 横幅、桌面端反复重载」——根因是入口 `inject` 硬声明了 `0.1.2-alpha.1` 才有的 `uiConversation` / `uiSession`，旧内核无提供方 → 整个 entry 停在 PENDING 被 boot 审计判失败，五个功能一起丢。现在入口只声明五个跨内核服务，功能三的整段注册搬进 `ctx.plugin(alphaFeatures)` 子 fiber（`alphaFeatures.inject` 承载这两个硬依赖），旧内核上子 fiber 静默停在 PENDING、其余四项照常；另加能力探测（子 fiber 激活即置位 `capability.alphaApi`）+ 设置页灰显提示「需内核 0.1.2-alpha.1+」+ 关键调用点形状探测与 try/catch 降级；新增 `tools/compat-check.mjs` 无头回归（真实 cordis，三场景）与 `npm run check`。行为与验收见[内核兼容矩阵](#内核兼容矩阵)。
+- **v0.4.3（本次）**：「修改的文件」支持 **run_code 内嵌工具调用路径提取**——当前 DSH agent 环境的文件操作全部包在 `run_code` 里（工具名恒为 `run_code`，路径藏在 `code` 字符串），旧逻辑按工具名白名单匹配导致这类会话一律显示「0 个文件」。新增 `mfsExtractRunCodePaths`：从 `code` 静态提取 `tools.edit/write/mkdir/move/copy/delete…` 内嵌调用的字面量路径（含字符串数组参数），按内嵌工具映射回白名单 ops，复用去重/徽标/打开链路。字符扫描解析（无正则拼接），反斜杠转义原样保留（Windows 路径不因 `\t`/`\n` 语义被改写）；变量拼接、模板串、shell 级写操作（pwsh `Set-Content`/重定向、gitbash）不计入。compat-check 新增对应断言（33/33 全绿）。
+- **v0.4.2（历史）**：内核版本自适应（软依赖 + 子 fiber 隔离），修复「切到 0.1.1-rc.x 旧内核后 Web UI 顶部 `Failed to load plugins` / `web boot: 1 entry did not activate` 横幅、桌面端反复重载」——根因是入口 `inject` 硬声明了 `0.1.2-alpha.1` 才有的 `uiConversation` / `uiSession`，旧内核无提供方 → 整个 entry 停在 PENDING 被 boot 审计判失败，五个功能一起丢。现在入口只声明五个跨内核服务，功能三的整段注册搬进 `ctx.plugin(alphaFeatures)` 子 fiber（`alphaFeatures.inject` 承载这两个硬依赖），旧内核上子 fiber 静默停在 PENDING、其余四项照常；另加能力探测（子 fiber 激活即置位 `capability.alphaApi`）+ 设置页灰显提示「需内核 0.1.2-alpha.1+」+ 关键调用点形状探测与 try/catch 降级；新增 `tools/compat-check.mjs` 无头回归（真实 cordis，三场景）与 `npm run check`。行为与验收见[内核兼容矩阵](#内核兼容矩阵)。
 - **v0.4.1（历史）**：按反馈移除 v0.4.0 的「composer 快捷命令条」——删除 `conversation.composer.dock` 注册、QCB 命名空间/CSS、偏好字段 `quickbarEnabled`/`quickbarItems` 及设置页快捷条编辑器；「DSH UI 工具」设置页保留（仅布局偏好：徽章开关 / 启动默认折叠 / 修改文件紧凑显示），插件回归五功能。
 - **v0.4.0（历史）**：新增「composer 快捷命令条」——注册进官方 `conversation.composer.dock`（list 加性，order 10），输入框下方一排常用命令 chip，点击 = `inputActions.setDraft` + `submit` 填入并发送，命令列表可在设置页自定义；新增「DSH UI 工具」设置页——注册进官方 `settings.section`（root list 槽，id `dsh-ui-tools`、order 100），集中开关四个既有功能 + 快捷命令条，「修改的文件」新增紧凑单行模式、侧边栏新增「启动默认折叠」偏好；全部偏好经 localStorage 持久化（`dsh-ui-tools:prefs:v1`，沿用 `dsh-better-sidebar` 同款社区惯例；官方 settings 命名空间需 host 侧注册 schema，本插件保持纯浏览器故不采用）。v0.4.1 起快捷命令条已移除。
 - **v0.3.4（历史）**：修复 DSH 0.1.2-alpha.1 上「折叠/展开」工具条错位（与余额挤在一行、「展开全部」被裁剪）——旧 CSS 里硬编码的侧边栏哈希类名 `.hHd-Xa_footerActions` 已失效，且 renderer 给 slot 套的 `div[data-slot]` 是 `display:contents`（不参与布局），原 `:has` 换行规则命中也无效。改用**哈希无关**的 `[class*="footerActions"]{flex-wrap:wrap !important}` 命中真实布局容器，内核升级不再失效。
