@@ -78,7 +78,7 @@ if (!located) {
 	console.error("找不到本机 cordis（DSH 内核副本）。可设 DSH_CORDIS_ENTRY 指向 cordis/lib/index.js 再跑。");
 	process.exit(2);
 }
-const { Context } = await import(pathToFileURL(located.entry).href);
+const { Context, Service } = await import(pathToFileURL(located.entry).href);
 
 /** cordis 的 FiberState 是 const enum（不导出），数值顺序取自 cordis/src/fiber.ts。 */
 const FIBER = { PENDING: 0, LOADING: 1, ACTIVE: 2, FAILED: 3, DISPOSED: 4, UNLOADING: 5 };
@@ -154,6 +154,8 @@ function loadClientBundle(logs) {
 /* ══════════════════════ 假内核服务 ══════════════════════ */
 
 const FAKE_CWD = "C:/ws/demo";
+/** 内核 remote.session 命名空间的替身；调用方没声明 remote 时 cordis tracker 会在取它之前抛错。 */
+const FAKE_REMOTE_SESSION = { selectModel: () => Promise.resolve() };
 const FAKE_CHAT_SNAPSHOT = {
 	legacy: {
 		nodes: [
@@ -182,15 +184,55 @@ function loadMfsCollector() {
 }
 
 /**
+ * 造一个内核 modelDirectories 服务的替身（v0.4.4）。
+ *
+ * 为什么要有 `needsRemote` 两态：功能一的取数路径依赖调用方 fiber 声明 `remote`
+ * （内核 `directoryFor()` 在调用方上下文里读 `this.ctx.remote.session`）。这里用
+ * 「内核是否提供 remote」两种内核来夹住这个设计属性：
+ *   - 提供 remote  → 功能一必须注册且能冷解析出目录（正向）；
+ *   - 不提供 remote → 功能一必须**优雅缺席**，entry 仍 ACTIVE、审计 0 失败（负向）。
+ * 后者正是 v0.4.2 那条铁律的守卫：硬依赖只能关在子作用域里，绝不能回到 entry 上。
+ *
+ * 注：cordis 的 Service tracker 把 `this.ctx` 重绑到调用方这一行为，在假内核里
+ * 无法忠实复刻（真实的内核 remote.session 是嵌套追踪服务），因此「冷调抛错」本身
+ * 由真机冒烟（tools/live-smoke.mjs）在真内核上负责验证，这里只钉住设计属性。
+ */
+function makeResolverClass({ needsRemote }) {
+	return class FakeModelDirectoryResolver extends Service {
+		static inject = needsRemote ? ["sessions", "remote", "remote.session"] : ["sessions"];
+
+		constructor(ctx, config) {
+			super(ctx, "modelDirectories");
+			this.ledger = config.ledger;
+		}
+
+		directoryFor(sessionId) {
+			const remoteSession = needsRemote ? this.ctx.remote.session : void 0;
+			this.ledger.directoryCalls.push(String(sessionId));
+			return {
+				store: {
+					subscribe: () => () => {},
+					getSnapshot: () => ({ groups: [], current: null, status: "ready", routable: true })
+				},
+				load: () => Promise.resolve(),
+				select: () => Promise.resolve(),
+				__remoteSession: remoteSession
+			};
+		}
+	};
+}
+
+/**
  * 造一个「内核」插件：把插件入口 inject 需要的服务 provide 出来。
  * alpha=false 模拟 0.1.1-rc.x（store 里没有 uiConversation / uiSession 的提供方），
  * alpha=true 模拟 0.1.2-alpha.1+。
  *
- * @param opts.alpha   是否提供 target 体系两个服务
- * @param opts.ledger  观测点：registered/provided/opened/locale
- * @param opts.seats   槽位注册表（name → [{ def, component }]），供取 inject face 断言
+ * @param opts.alpha          是否提供 target 体系两个服务
+ * @param opts.withholdRemote 是否扣掉 remote 命名空间（负向场景 D）
+ * @param opts.ledger         观测点：registered/provided/opened/locale/directoryCalls
+ * @param opts.seats          槽位注册表（name → [{ def, component }]），供取 inject face 断言
  */
-function makeKernel({ alpha, ledger, seats }) {
+function makeKernel({ alpha, withholdRemote = false, ledger, seats }) {
 	const slot = (name) => {
 		if (!seats.has(name)) seats.set(name, []);
 		return seats.get(name);
@@ -236,13 +278,9 @@ function makeKernel({ alpha, ledger, seats }) {
 			list: { getSnapshot: () => ({ items: [] }) },
 			openPath: (target) => { ledger.opened.push(target); return Promise.resolve(); }
 		},
-		modelDirectories: {
-			directoryFor: () => ({
-				store: { subscribe: () => () => {}, getSnapshot: () => ({}) },
-				load: () => Promise.resolve(),
-				select: () => Promise.resolve()
-			})
-		}
+		// modelDirectories 由下面真正的 cordis Service 提供（见 makeResolverClass），
+		// 这里只负责 remote 命名空间的有无。
+		...(withholdRemote ? {} : { remote: { session: FAKE_REMOTE_SESSION }, "remote.session": FAKE_REMOTE_SESSION })
 	};
 	if (alpha) {
 		services.uiConversation = {
@@ -254,8 +292,12 @@ function makeKernel({ alpha, ledger, seats }) {
 		};
 		services.uiSession = { provide: (def) => { ledger.provided.push(def); return () => {}; } };
 	}
-	return function fakeKernel(ctx) {
+	return async function fakeKernel(ctx) {
 		for (const [name, value] of Object.entries(services)) ctx.provide(name, value);
+		// 必须在 provide 之后挂载并等它就位：Service 的 static inject 要能解析到
+		// sessions（以及 needsRemote 时的 remote/remote.session），否则 bundle 的
+		// modelDirectories 依赖会停在 PENDING。
+		await ctx.plugin(makeResolverClass({ needsRemote: !withholdRemote }), { ledger });
 	};
 }
 
@@ -282,13 +324,13 @@ function fibersOf(ctx, pluginName) {
 }
 
 /** 挂一个场景：假内核 + 真 bundle entry。 */
-async function mount({ alpha }) {
+async function mount({ alpha, withholdRemote = false }) {
 	const logs = { error: [], warn: [], info: [], appended: [] };
-	const ledger = { registered: [], provided: [], opened: [], locale: [] };
+	const ledger = { registered: [], provided: [], opened: [], locale: [], directoryCalls: [] };
 	const seats = new Map();
 	const bundle = loadClientBundle(logs);
 	const ctx = new Context();
-	const kernelFiber = ctx.plugin(makeKernel({ alpha, ledger, seats }));
+	const kernelFiber = ctx.plugin(makeKernel({ alpha, withholdRemote, ledger, seats }));
 	await kernelFiber;
 	const entryFiber = ctx.plugin(bundle.mod);
 	await entryFiber;
@@ -359,6 +401,17 @@ section("B. 新内核（两服务齐备）：五个功能全部生效");
 	await viewFace?.openFile("src/a.ts");
 	check("openFile 经 workspaces.openPath 打开绝对路径", env.ledger.opened.includes(`${FAKE_CWD}/src/a.ts`), env.ledger.opened.join(", "));
 
+	// v0.4.4：功能一必须能「冷」解析出目录 —— 内核 directoryFor() 在**调用方**上下文里读
+	// remote.session（Service tracker 重绑 this.ctx），插件少声明 remote 就会抛错。
+	// 这正是 v0.4.3 在 0.1.5-rc.1 上每次挂载会话抛一次的缺陷。
+	{
+		const seatFace = env.seats.get("conversation.input.right")?.[0]?.def.inject("s1");
+		check("功能一座位冷解析出可用目录（remote / remote.session 已声明）", seatFace?.available === true,
+			JSON.stringify({ available: seatFace?.available }));
+		check("功能一 directoryFor 真的被调到（冷路径走通）",
+			env.ledger.directoryCalls.includes("s1"), env.ledger.directoryCalls.join(", ") || "（无调用）");
+	}
+
 	const hook = env.ledger.provided[0]?.resolve({ sessionId: "s1" })?.hooks?.modifiedFiles;
 	check("useModifiedFiles 读到 chat target 快照", hook?.getSnapshot() === FAKE_CHAT_SNAPSHOT);
 
@@ -400,6 +453,29 @@ section("C. 服务后到：子 fiber 自动补挂（无需轮询）");
 	check("补挂后 entry 仍 ACTIVE、审计仍 0 失败",
 		env.entryFiber.state === FIBER.ACTIVE
 		&& auditLoaderEntries([{ name: "dsh-ui-tools", fiber: env.entryFiber }]).length === 0);
+	await env.entryFiber.dispose();
+}
+
+/* ══════════════════════ 场景 D：内核不提供 remote（v0.4.4 负向） ══════════════════════ */
+
+section("D. 内核不提供 remote：功能一优雅缺席，不拖垮 entry（守住 v0.4.2 铁律）");
+{
+	const env = await mount({ alpha: true, withholdRemote: true });
+	check("entry 仍 ACTIVE（remote 依赖没有逃到 entry 上）", env.entryFiber.state === FIBER.ACTIVE, stateOf(env.entryFiber));
+	check("boot 审计 0 失败 → 无「1 entry did not activate」/无横幅", env.failures.length === 0, env.failures.join(" | ") || "pass");
+	check("功能一缺席（子作用域停在 PENDING，可接受降级）",
+		!env.ledger.registered.includes("conversation.input.right/ui-tools-model-seat"),
+		env.ledger.registered.join(", "));
+
+	for (const [label, seat] of [
+		["功能二 折叠条", "sidebar.footer.action/ui-tools-workspace-collapse"],
+		["功能三 修改的文件", "conversation.view/ui-tools-modified-files"],
+		["功能四 工作区徽章", "conversation.session.header.actions/ui-tools-workspace-chip"],
+		["功能五 设置页", "settings.section/dsh-ui-tools"]
+	]) {
+		check(`remote 缺席时仍保留 ${label}`, env.ledger.registered.includes(seat), seat);
+	}
+	check("无 dsh-ui-tools 异常日志（静默降级）", env.logs.error.length === 0, env.logs.error.join(" | ") || "clean");
 	await env.entryFiber.dispose();
 }
 

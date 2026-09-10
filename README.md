@@ -57,7 +57,7 @@ DSH Web 插件：五个 UI 工具合并成一个包，只动对应控件，不�
 ## 实现原理
 
 - 官方模型组件照常注册在 `conversation.input.model`（数据/提交逻辑原样保留），用 CSS 隐藏官方触发按钮；
-- 本插件通过 `modelDirectories` 服务读取同一份模型目录（groups = 供应商分组），注册到 `conversation.input.right`（list slot）追加双按钮；
+- 本插件通过 `modelDirectories` 服务读取同一份模型目录（groups = 供应商分组），注册到 `conversation.input.right`（list slot）追加双按钮；**v0.4.4**：该子作用域必须同时声明 `remote` **和** `remote.session`——内核对 `directoryFor()` 的实现会在**调用方**上下文里读 `this.ctx.remote.session`（cordis 的 Service tracker 会把 service 的 `this.ctx` 重绑到调用者），而 `remote.session` 是嵌套追踪服务，只声明 `remote` 仍会抛 `cannot get property "remote.session" without inject`；
 - 选择模型/推理等级时调用官方 `directory.select(...)`，官方 store 同步更新，输入框状态与原生一致；
 - 折叠条注册到 `sidebar.footer.action`——官方渲染位置就是 footer 顶部、紧贴工作区列表正下方，用 CSS（对齐 `--dsh-session-list-edge-inset` 内边距）贴合列表即可，**不搬动 DOM**。搬动 slot 渲染出来的节点会与框架重渲染互相触发，导致渲染进程 100% CPU 卡死（v0.1.0 全局观察器、v0.1.2 收窄观察器均因此卡死；v0.1.3 起彻底不搬）。
 - 修改的文件 tab 注册进 `conversation.view`；节点数据经 `ctx.uiConversation.binding(...).target("chat")` 读 chat target，并通过 `ctx.uiSession.provide` 暴露 `useModifiedFiles` 标准 hook 给视图消费（与官方「对话」/「轨迹」同构）。
@@ -81,15 +81,19 @@ DSH Web 插件：五个 UI 工具合并成一个包，只动对应控件，不�
 
 ```bash
 node --check lib/client.js       # 语法
-node tools/compat-check.mjs      # 内核自适应回归（真实 cordis，三场景断言）
+node tools/compat-check.mjs      # 内核自适应回归（真实 cordis，四场景断言）
+node tools/live-smoke.mjs <URL+token>   # 真机冒烟（可选；自动探测本机 Chrome/Edge）
 # 或一次跑完：npm run check
 ```
 
-`tools/compat-check.mjs` 不开浏览器也不重启服务：它从本机已装内核副本里加载 cordis，搭一个最小宿主把 `lib/client.js` 的 entry 挂上去，在「旧内核 / 新内核 / 服务后到」三种场景下复刻 boot 的审计口径（只看 loader entry fiber 是否停在 PENDING），断言入口激活、子 fiber 状态、各槽位注册、`useModifiedFiles` 取数与设置页能力位。
+`tools/compat-check.mjs` 不开浏览器也不重启服务：它从本机已装内核副本里加载 cordis，搭一个最小宿主把 `lib/client.js` 的 entry 挂上去，在「旧内核 / 新内核 / 服务后到 / 内核不提供 remote」四种场景下复刻 boot 的审计口径（只看 loader entry fiber 是否停在 PENDING），断言入口激活、子 fiber 状态、各槽位注册、`useModifiedFiles` 取数、功能一目录冷解析与设置页能力位。
+
+`tools/live-smoke.mjs` 用 puppeteer-core 驱动本机 Chromium 内核浏览器（按 `DSH_SMOKE_CHROME` → ms-playwright 缓存 → 系统 Chrome/Edge → 常见类 Unix 路径依次探测），打开正在运行的 DSH Web 断言无加载横幅、各功能 DOM 标记在位、并截图。拿不到 URL/token 或找不到浏览器时 SKIP（exit 0）。
 
 ## 变更记录
 
-- **v0.4.3（本次）**：「修改的文件」支持 **run_code 内嵌工具调用路径提取**——当前 DSH agent 环境的文件操作全部包在 `run_code` 里（工具名恒为 `run_code`，路径藏在 `code` 字符串），旧逻辑按工具名白名单匹配导致这类会话一律显示「0 个文件」。新增 `mfsExtractRunCodePaths`：从 `code` 静态提取 `tools.edit/write/mkdir/move/copy/delete…` 内嵌调用的字面量路径（含字符串数组参数），按内嵌工具映射回白名单 ops，复用去重/徽标/打开链路。字符扫描解析（无正则拼接），反斜杠转义原样保留（Windows 路径不因 `\t`/`\n` 语义被改写）；变量拼接、模板串、shell 级写操作（pwsh `Set-Content`/重定向、gitbash）不计入。compat-check 新增对应断言（33/33 全绿）。
+- **v0.4.4（本次）**：修复**功能一在 0.1.5-rc.1 内核上每次挂载会话抛一次 `cannot get property "remote.session" without inject`**。根因：内核 `ModelDirectoryResolver.directoryFor()` 内部要读 `this.ctx.remote.session` 构造 ModelDirectory，而 cordis 的 Service tracker 会把 service 的 `this.ctx` **重绑到调用方上下文**——所以调用方 fiber 必须自己声明 `remote`。本插件功能一的 `ctx.inject([...])` 只声明了 `slots/modelDirectories/sessions`，于是每次冷解析（新会话、会话切换）都抛未捕获错误；只因 `directoryFor` 开头有「已缓存则早返回」的短路，多数时候命中内核自建目录才没炸出可见故障（竞态相关）。修复：① 在该**子作用域**补声明 `remote` + `remote.session`（两者都要：后者是嵌套追踪服务，只补前者实测错误照旧；刻意都不进 loader entry 的 `inject`，否则会重新引入 v0.4.2 修掉的旧内核 entry 停 PENDING / 五功能全丢）；② 加 `mssResolveDirectory()` 兜底，解析失败不再冒泡成 pageerror，而是降级为「本座位不渲染 + 经 `html[data-ui-tools-model-seat="fallback"]` 把官方控件放回来」，避免「官方被 CSS 隐藏 + 插件座位缺席」两头皆空。同类语义对等插件 `dsh-vision-router` 已有防护代码。回归：compat-check 扩到**四场景 43 断言**（新增场景 D 用「内核不提供 remote」夹住依赖位置；功能一冷解析正向断言），live-smoke 新增 `remote.session` 与**座位真的渲染**两条真机断言（只断言「不报错」不够——兜底会把异常吞成 warn 并静默降级），并修复浏览器探测（原先只认 ms-playwright 写死路径，本机没装 Playwright 时静默 SKIP）。
+- **v0.4.3（历史）**：「修改的文件」支持 **run_code 内嵌工具调用路径提取**——当前 DSH agent 环境的文件操作全部包在 `run_code` 里（工具名恒为 `run_code`，路径藏在 `code` 字符串），旧逻辑按工具名白名单匹配导致这类会话一律显示「0 个文件」。新增 `mfsExtractRunCodePaths`：从 `code` 静态提取 `tools.edit/write/mkdir/move/copy/delete…` 内嵌调用的字面量路径（含字符串数组参数），按内嵌工具映射回白名单 ops，复用去重/徽标/打开链路。字符扫描解析（无正则拼接），反斜杠转义原样保留（Windows 路径不因 `\t`/`\n` 语义被改写）；变量拼接、模板串、shell 级写操作（pwsh `Set-Content`/重定向、gitbash）不计入。compat-check 新增对应断言（当时 33/33 全绿）。
 - **v0.4.2（历史）**：内核版本自适应（软依赖 + 子 fiber 隔离），修复「切到 0.1.1-rc.x 旧内核后 Web UI 顶部 `Failed to load plugins` / `web boot: 1 entry did not activate` 横幅、桌面端反复重载」——根因是入口 `inject` 硬声明了 `0.1.2-alpha.1` 才有的 `uiConversation` / `uiSession`，旧内核无提供方 → 整个 entry 停在 PENDING 被 boot 审计判失败，五个功能一起丢。现在入口只声明五个跨内核服务，功能三的整段注册搬进 `ctx.plugin(alphaFeatures)` 子 fiber（`alphaFeatures.inject` 承载这两个硬依赖），旧内核上子 fiber 静默停在 PENDING、其余四项照常；另加能力探测（子 fiber 激活即置位 `capability.alphaApi`）+ 设置页灰显提示「需内核 0.1.2-alpha.1+」+ 关键调用点形状探测与 try/catch 降级；新增 `tools/compat-check.mjs` 无头回归（真实 cordis，三场景）与 `npm run check`。行为与验收见[内核兼容矩阵](#内核兼容矩阵)。
 - **v0.4.1（历史）**：按反馈移除 v0.4.0 的「composer 快捷命令条」——删除 `conversation.composer.dock` 注册、QCB 命名空间/CSS、偏好字段 `quickbarEnabled`/`quickbarItems` 及设置页快捷条编辑器；「DSH UI 工具」设置页保留（仅布局偏好：徽章开关 / 启动默认折叠 / 修改文件紧凑显示），插件回归五功能。
 - **v0.4.0（历史）**：新增「composer 快捷命令条」——注册进官方 `conversation.composer.dock`（list 加性，order 10），输入框下方一排常用命令 chip，点击 = `inputActions.setDraft` + `submit` 填入并发送，命令列表可在设置页自定义；新增「DSH UI 工具」设置页——注册进官方 `settings.section`（root list 槽，id `dsh-ui-tools`、order 100），集中开关四个既有功能 + 快捷命令条，「修改的文件」新增紧凑单行模式、侧边栏新增「启动默认折叠」偏好；全部偏好经 localStorage 持久化（`dsh-ui-tools:prefs:v1`，沿用 `dsh-better-sidebar` 同款社区惯例；官方 settings 命名空间需 host 侧注册 schema，本插件保持纯浏览器故不采用）。v0.4.1 起快捷命令条已移除。

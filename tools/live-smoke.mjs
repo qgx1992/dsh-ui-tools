@@ -18,6 +18,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
+import { fileURLToPath } from "node:url";
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
 
 const TARGET = process.argv[2];
 const OUT = path.resolve(process.argv[3] || path.join(process.env.TEMP || "/tmp", "dsh-ui-tools-smoke"));
@@ -28,18 +31,60 @@ if (!TARGET) {
 	process.exit(0);
 }
 
-const require = createRequire(path.join(homedir(), ".dsh", "profiles", "web", "noop.js"));
-const puppeteer = require("puppeteer-core");
-
-const CHROME_CANDIDATES = [
-	path.join(homedir(), "AppData", "Local", "ms-playwright", "chromium-1234", "chrome-win64", "chrome.exe"),
-	path.join(homedir(), "AppData", "Local", "ms-playwright", "chromium", "chrome-win64", "chrome.exe")
-].filter((row) => fs.existsSync(row));
-
-if (!CHROME_CANDIDATES.length) {
-	console.log("SKIP 未找到本机 Chromium（ms-playwright 缓存），无法跑真机冒烟");
+/* ── puppeteer-core：优先按 web profile 解析（社区插件常装在那里），退回本仓库 ── */
+let puppeteer = null;
+for (const base of [path.join(homedir(), ".dsh", "profiles", "web", "package.json"), path.join(HERE, "package.json")]) {
+	try { puppeteer = createRequire(base)("puppeteer-core"); break; } catch { /* 换下一个 base */ }
+}
+if (puppeteer === null) {
+	console.log("SKIP 未安装 puppeteer-core（可在 ~/.dsh/profiles/web 下安装，或在本仓库 npm i -D puppeteer-core）");
 	process.exit(0);
 }
+
+/**
+ * 本机可用的 Chromium 内核浏览器。
+ * 旧版只认 ms-playwright 缓存里写死版本号的路径，本机没装 Playwright 时会静默 SKIP；
+ * 现在按 环境变量 → ms-playwright 任意 chromium 构建 → 系统 Chrome/Edge → 常见类 Unix 路径 依次探测。
+ * puppeteer-core 可以驱动任意 Chromium 内核浏览器，不要求是 Playwright 下载的那份。
+ */
+function chromiumCandidates() {
+	const out = [];
+	if (process.env.DSH_SMOKE_CHROME) out.push(process.env.DSH_SMOKE_CHROME);
+	const msPlaywright = path.join(homedir(), "AppData", "Local", "ms-playwright");
+	if (fs.existsSync(msPlaywright)) {
+		for (const dir of fs.readdirSync(msPlaywright)) {
+			if (!dir.startsWith("chromium")) continue;
+			out.push(
+				path.join(msPlaywright, dir, "chrome-win64", "chrome.exe"),
+				path.join(msPlaywright, dir, "chrome-win", "chrome.exe"),
+				path.join(msPlaywright, dir, "chrome-linux", "chrome"),
+				path.join(msPlaywright, dir, "chrome-mac", "Chromium.app", "Contents", "MacOS", "Chromium")
+			);
+		}
+	}
+	const pf = process.env.PROGRAMFILES || "C:\\Program Files";
+	const pf86 = process.env["PROGRAMFILES(X86)"] || "C:\\Program Files (x86)";
+	const local = process.env.LOCALAPPDATA || "";
+	out.push(
+		path.join(local, "Google", "Chrome", "Application", "chrome.exe"),
+		path.join(pf, "Google", "Chrome", "Application", "chrome.exe"),
+		path.join(pf86, "Google", "Chrome", "Application", "chrome.exe"),
+		path.join(pf, "Microsoft", "Edge", "Application", "msedge.exe"),
+		path.join(pf86, "Microsoft", "Edge", "Application", "msedge.exe"),
+		"/usr/bin/google-chrome",
+		"/usr/bin/chromium",
+		"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+	);
+	return out.filter((row) => row && fs.existsSync(row));
+}
+
+const CHROME_CANDIDATES = chromiumCandidates();
+
+if (!CHROME_CANDIDATES.length) {
+	console.log("SKIP 未找到可用 Chromium 内核浏览器（可设 DSH_SMOKE_CHROME=<可执行文件绝对路径> 指定）");
+	process.exit(0);
+}
+console.log(`使用浏览器：${CHROME_CANDIDATES[0]}`);
 
 const MARKERS = {
 	styleTag: 'style[data-plugin-css="dsh-ui-tools/styles"]',
@@ -87,6 +132,21 @@ try {
 		await page.evaluate((sel) => !!document.querySelector(sel), MARKERS.styleTag));
 	check("无 dsh-ui-tools 相关 pageerror", pageErrors.filter((row) => /ui-tools|mfs|alphaFeatures/.test(row)).length === 0,
 		pageErrors.slice(0, 3).join(" | ") || "clean");
+	// v0.4.4 回归：功能一冷调 directoryFor 时若漏声明 remote / remote.session，内核会在每次
+	// 挂载会话时抛「cannot get property "remote.session" without inject」。假内核复刻不了
+	// cordis 的 tracker 重绑，只能在真机上断言它彻底消失。
+	const remoteErrs = pageErrors.filter((row) => /remote\.session/.test(row));
+	check("无 remote.session inject 报错（功能一 remote 依赖已就位）", remoteErrs.length === 0,
+		remoteErrs.slice(0, 2).join(" | ") || "clean");
+	// 光「不报错」不够：兜底会把异常吞成 warn 并降级回官方控件，功能一等于静默失效。
+	// 所以必须断言双按钮座位真的渲染、且没有走到 fallback 分支。
+	const seat = await page.evaluate(() => ({
+		seat: document.querySelectorAll("[data-mss-seat]").length,
+		btn: document.querySelectorAll("[data-mss-btn]").length,
+		fallback: document.documentElement.dataset.uiToolsModelSeat ?? null
+	}));
+	check("功能一双按钮座位真的渲染（未静默降级回官方控件）",
+		seat.seat > 0 && seat.btn === 2 && seat.fallback === null, JSON.stringify(seat));
 
 	await page.screenshot({ path: path.join(OUT, "01-web-home.png"), fullPage: false });
 
@@ -197,7 +257,8 @@ try {
 	}
 
 	console.log("\n3. demo 静态预览（灰显两态）");
-	const demo = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/(\w:)/, "$1")), "..", "demo", "settings.html");
+	// 用 fileURLToPath：旧写法取 URL.pathname 不会解码 %20，本仓库路径含空格时会指错目录。
+	const demo = path.resolve(HERE, "..", "demo", "settings.html");
 	for (const [name, alpha] of [["03-demo-alpha-kernel", true], ["04-demo-old-kernel", false]]) {
 		const dp = await browser.newPage();
 		await dp.setViewport({ width: 900, height: 700 });
