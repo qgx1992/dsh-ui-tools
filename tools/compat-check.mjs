@@ -80,6 +80,37 @@ if (!located) {
 }
 const { Context, Service } = await import(pathToFileURL(located.entry).href);
 
+/**
+ * 本机内核自带的 semver（dsh CLI 的传递依赖）。
+ *
+ * 声明层断言必须用**真实 semver 语义**校验 `engines.dsh`，不能手搓匹配器：
+ * npm 的预发布规则是整段声明的成败所在（`>=0.1.2-alpha.1` 竟不匹配 `0.1.5-rc.2`），
+ * 自搓一份就等于把「被测语义」换成「我以为的语义」，断言随之失效。
+ */
+function locateSemver() {
+	const explicit = process.env.DSH_SEMVER_ENTRY;
+	if (explicit && fs.existsSync(explicit)) return explicit;
+	for (const root of kernelRoots()) {
+		let kernels = [];
+		try { kernels = fs.readdirSync(root); } catch { continue; }
+		for (const kernel of kernels) {
+			const pnpmDir = path.join(root, kernel, "node_modules", ".pnpm");
+			let rows = [];
+			try { rows = fs.readdirSync(pnpmDir); } catch { continue; }
+			for (const row of rows.sort().reverse()) {
+				if (!/^semver@/.test(row)) continue;
+				const entry = path.join(pnpmDir, row, "node_modules", "semver", "index.js");
+				if (fs.existsSync(entry)) return entry;
+			}
+		}
+	}
+	return null;
+}
+
+const semverEntry = locateSemver();
+const semver = semverEntry ? await import(pathToFileURL(semverEntry).href) : null;
+const manifest = JSON.parse(fs.readFileSync(path.join(REPO, "package.json"), "utf8"));
+
 /** cordis 的 FiberState 是 const enum（不导出），数值顺序取自 cordis/src/fiber.ts。 */
 const FIBER = { PENDING: 0, LOADING: 1, ACTIVE: 2, FAILED: 3, DISPOSED: 4, UNLOADING: 5 };
 const FIBER_NAME = ["PENDING", "LOADING", "ACTIVE", "FAILED", "DISPOSED", "UNLOADING"];
@@ -351,6 +382,59 @@ check("入口 inject = slots/modelDirectories/sessions/locale/workspaces",
 check("bundle 只 require react（client 模块表铁律）",
 	probe.required.length > 0 && probe.required.every((id) => id === "react"),
 	probe.required.join(",") || "（无）");
+
+/* ── 场景 0b：机器可读内核约束（v0.4.5） ──
+ * 生态实际消费的位置是 `engines.dsh`（dshmarket 的 manifestFacts 读它，并在
+ * 安装/更新前拒装不兼容版本）；`dsh.engines.dsh` 是它的自然归属位置，两个位置都写。
+ * 这里钉住的是「声明本身」——区间必须在真实 semver 下覆盖旧内核到当前内核，
+ * 且不能把未来内核误判为不兼容（那会让 dshmarket 拒绝合法升级）。 */
+{
+	section("0b. 声明层：机器可读内核约束（engines.dsh）");
+	const declared = manifest.engines?.dsh;
+	const declaredNested = manifest.dsh?.engines?.dsh;
+	check("package.json 声明 engines.dsh", typeof declared === "string" && declared.length > 0, String(declared));
+	check("dsh.engines.dsh 与顶层一致（dshmarket 两处都读）", declared === declaredNested,
+		`top=${String(declared)} nested=${String(declaredNested)}`);
+
+	if (semver === null) {
+		check("本机找到 semver（声明层断言需要真实语义）", false, "可用 DSH_SEMVER_ENTRY=<...>/semver/index.js 指定");
+	} else {
+		// npm 上**全部**已发布内核版本（@deepseek-ai/dsh，21 个）+ 2 个「未来」哨兵。
+		// 逐项硬编码期望值，而不是按区间反推——否则断言退化成同义反复。
+		const KERNELS = [
+			["0.0.1-rc.1", false], ["0.0.1-rc.2", false], ["0.0.1-rc.5", false],
+			["0.1.0-rc.2", false], ["0.1.0-rc.3", false], ["0.1.0-rc.6", false], ["0.1.0-rc.7", false], ["0.1.0-rc.8", false],
+			["0.1.1-rc.1", true], ["0.1.1-rc.2", true],
+			["0.1.2-alpha.2", true], ["0.1.2-alpha.3", true], ["0.1.2-alpha.4", true], ["0.1.2-alpha.5", true],
+			["0.1.2-rc.1", true], ["0.1.3-alpha.2", true],
+			["0.1.5-alpha.1", true], ["0.1.5-alpha.2", true], ["0.1.5-rc.1", true], ["0.1.5-rc.2", true],
+			["0.1.6-alpha.1", true],
+			// 未发布：钉住「不硬顶未来内核」（误判会让 dshmarket 拒绝合法升级）
+			["0.2.0", true], ["1.0.0", true]
+		];
+		// 普通语义与市场语义（includePrerelease）必须逐项一致：两者不一致意味着
+		// 声明在市场里和在本地 semver 下判决不同，是无声的兼容性裂缝。
+		const divergent = KERNELS.filter(([v]) =>
+			semver.satisfies(v, declared) !== semver.satisfies(v, declared, { includePrerelease: true }));
+		check("两种 semver 语义（普通 / includePrerelease）判决一致",
+			divergent.length === 0, divergent.map(([v]) => v).join(", ") || "一致");
+
+		const wrong = KERNELS.filter(([v, want]) => semver.satisfies(v, declared) !== want);
+		check(`区间覆盖全部已发布内核（21 个）+ 2 个未来哨兵`,
+			wrong.length === 0,
+			wrong.length ? wrong.map(([v, want]) => `${v} 期望 ${want} 实得 ${!want}`).join(", ")
+				: "0.0.1-rc.1 → 1.0.0 逐项全对");
+
+		// 回归钉子：README 曾写「0.1.2-alpha.1 及更新」，而该口径在真实 semver 下
+		// **不匹配** 0.1.5-rc.2（预发布版只与同 x.y.z 的元组比较）。这条钉住本仓库
+		// 当前实测内核 0.1.5-rc.2 必须被自己的声明覆盖。
+		check("当前实测内核 0.1.5-rc.2 被自身声明覆盖（预发布回归钉）",
+			semver.satisfies("0.1.5-rc.2", declared) === true,
+			`${declared} vs 0.1.5-rc.2`);
+		check("旧内核 0.1.1-rc.1 被覆盖（降级路径仍在声明内）",
+			semver.satisfies("0.1.1-rc.1", declared) === true, `${declared} vs 0.1.1-rc.1`);
+	}
+}
 
 /* ══════════════════════ 场景 A：旧内核 0.1.1-rc.x ══════════════════════ */
 

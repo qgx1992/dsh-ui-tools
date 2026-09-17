@@ -72,10 +72,27 @@ DSH Web 插件：五个 UI 工具合并成一个包，只动对应控件，不�
 
 | DSH 内核 | 入口 fiber | `alphaFeatures` 子 fiber | boot 审计 | 横幅 | 可用功能 |
 |---|---|---|---|---|---|
-| `0.1.2-alpha.1` 及更新 | active | active | pass | 无 | 全部 5 项 |
+| `0.1.2-alpha.1` 及更新¹ | active | active | pass | 无 | 全部 5 项 |
 | `0.1.1-rc.1` / `0.1.1-rc.2` | active | pending（静默） | pass | 无 | 1 / 2 / 4 / 5（功能三缺席，设置页对应开关灰显） |
 
-> 本包在 `0.1.2-alpha.3` 上验证全量功能；旧内核降级经 `node tools/compat-check.mjs`（真实 cordis）断言。
+> ¹ 「更新」指 **同属 0.1.2-alpha.1 之后的发布线**（`0.1.2-alpha.1` / `0.1.2-*` / `0.1.3-*` / `0.1.5-*` / `0.1.6-*` 及更高）。DSH 的预发布版按 semver 只与**同一 `x.y.z` 元组**比较，所以字面区间 `>=0.1.2-alpha.1` 在真实 semver 下**并不匹配** `0.1.5-rc.2`——本包因此按发布线逐条声明，而不是写一个连续区间，详见下节。
+
+### 机器可读的内核约束（`engines.dsh`）
+
+`package.json` 同时声明两处（生态两种写法都在用，值必须一致）：
+
+```json
+"engines":      { "dsh": "^0.1.1-0 || ^0.1.2-0 || ^0.1.3-0 || ^0.1.5-0 || >=0.1.6-0" },
+"dsh": { "engines": { "dsh": "^0.1.1-0 || ^0.1.2-0 || ^0.1.3-0 || ^0.1.5-0 || >=0.1.6-0" } }
+```
+
+- **谁在读**：`dshmarket` 的 `manifestFacts()` 读顶层 `engines.dsh`，缺失时回落到 `dsh.engines.dsh`；市场会据此在 **Discover 页展示宿主兼容性**，并在**安装/更新前直接拒绝**判定为不兼容的版本（`deriveHostCompatibility` → `incompatible` → 400）。
+- **生效范围（请如实理解）**：市场是**按 npm 包名**向 registry 取这份事实的。本包目前以 `github:qgx1992/dsh-ui-tools` 分发，而该更新路径对 git 源不查 registry（`usesNpmUpdateTarget = !restore && !isGit`）；且 `dsh-ui-tools` 这个 npm 名字属于他人（另一作者的插件，无此声明）。所以这条声明当下的作用是**统一生态惯例、并为将来可能的 npm 发布备好**，**不构成本机 github 安装路径的运行时保险**——本包的旧内核自动降级是靠 `alphaFeatures` 子 fiber 实现的（见上），与这条声明无关。
+- **为什么是逐条发布线而不是 `>=0.1.1-rc.1`**：semver 的预发布规则要求预发布版本只匹配**同 `x.y.z`** 的区间，因此 `>=0.1.1-rc.1` 会漏掉 `0.1.2-*`、`0.1.5-*` 等线；`^0.1.N-0` 每项覆盖一条线，末项 `>=0.1.6-0` 兜住此后所有新线，且**不硬顶未来内核**（把未来内核误判为不兼容会让市场拒绝合法升级）。
+- **`-0` 后缀的作用**：`^0.1.1-0` 的下界取该线**最早的预发布**，否则区间会被预发布规则排除。
+- 该区间已对 npm 上全部 21 个已发布内核版本 + 2 个未来哨兵逐项断言，并保证普通 semver 语义与市场侧 `includePrerelease` 语义**判决一致**（见下「自检」）。
+
+> **验证口径**：`node tools/compat-check.mjs` 当前跑在 `0.1.5-rc.2` 内核副本的**真实 cordis** 上（49/49 全绿），断言五个功能的槽位注册、子 fiber 状态与 boot 审计口径；`0.1.2-alpha.3` 为历史验证点。真机（浏览器）行为另由 `tools/live-smoke.mjs` 覆盖，需自备 URL+token。**本仓库未在 `0.1.6-*` 上实测**——该线由 `engines.dsh` 的 `>=0.1.6-0` 声明为预期兼容，尚未验证。
 
 ## 自检
 
@@ -88,10 +105,13 @@ node tools/live-smoke.mjs <URL+token>   # 真机冒烟（可选；自动探测�
 
 `tools/compat-check.mjs` 不开浏览器也不重启服务：它从本机已装内核副本里加载 cordis，搭一个最小宿主把 `lib/client.js` 的 entry 挂上去，在「旧内核 / 新内核 / 服务后到 / 内核不提供 remote」四种场景下复刻 boot 的审计口径（只看 loader entry fiber 是否停在 PENDING），断言入口激活、子 fiber 状态、各槽位注册、`useModifiedFiles` 取数、功能一目录冷解析与设置页能力位。
 
+另含**声明层断言**（场景 0b）：用内核自带的真实 `semver` 校验 `engines.dsh` 覆盖全部已发布内核版本、不误伤未来内核，并保证普通语义与市场侧 `includePrerelease` 语义判决一致——手搓匹配器会把「被测语义」偷换成「我以为的语义」，故不用。可用 `DSH_SEMVER_ENTRY=<...>/semver/index.js` 指定匹配器。
+
 `tools/live-smoke.mjs` 用 puppeteer-core 驱动本机 Chromium 内核浏览器（按 `DSH_SMOKE_CHROME` → ms-playwright 缓存 → 系统 Chrome/Edge → 常见类 Unix 路径依次探测），打开正在运行的 DSH Web 断言无加载横幅、各功能 DOM 标记在位、并截图。拿不到 URL/token 或找不到浏览器时 SKIP（exit 0）。
 
 ## 变更记录
 
+- **v0.4.5（本次）**：新增**机器可读的内核版本约束** `engines.dsh`（同时写顶层与 `dsh.engines.dsh`，两者值一致），并修正 README 里「`0.1.2-alpha.1` 及更新」这一**在真实 semver 下不成立**的口径。背景：此前本包只在 README 与 `package.json` description 里用自然语言描述内核要求，没有任何字段可供工具读取——而生态实际消费的字段是 `engines.dsh`：`dshmarket` 的 `manifestFacts()` 读它（缺失时回落 `dsh.engines.dsh`），在 Discover 页展示宿主兼容性，并在**安装/更新前拒绝**判定为不兼容的版本。区间写成 `^0.1.1-0 || ^0.1.2-0 || ^0.1.3-0 || ^0.1.5-0 || >=0.1.6-0`：**不能**写成 `>=0.1.1-rc.1` 或 `>=0.1.2-alpha.1`——semver 要求预发布版只匹配**同 `x.y.z`** 区间，实测 `>=0.1.2-alpha.1` 不匹配 `0.1.5-rc.2`（本仓库当前实测内核），`>=0.1.1-rc.1` 也会漏掉 `0.1.2-*` / `0.1.5-*` 各线；逐条 `^0.1.N-0` 覆盖每条已发布线，末项 `>=0.1.6-0` 兜住后续新线且不硬顶未来内核（误判未来内核会让市场拒绝合法升级）。`-0` 后缀用于把下界取到该线最早的预发布。compat-check 新增场景 0b（6 条断言，合计 **49/49**）：用**内核自带真实 semver** 对 npm 上**全部 21 个**已发布内核版本 + 2 个未来哨兵逐项断言，并要求普通语义与市场侧 `includePrerelease` 语义判决一致（偏差即失败）。负向对照有效：把区间换回 `>=0.1.2-alpha.1` 触发 4 条 FAIL（含 `0.1.5-rc.2` 未被自身声明覆盖）。**未改动任何运行期逻辑**（`lib/client.js` 与 v0.4.4 逐字一致）；内核兼容行为与 v0.4.4 相同，当前实测内核 `0.1.5-rc.2`。
 - **v0.4.4（本次）**：修复**功能一在 0.1.5-rc.1 内核上每次挂载会话抛一次 `cannot get property "remote.session" without inject`**。根因：内核 `ModelDirectoryResolver.directoryFor()` 内部要读 `this.ctx.remote.session` 构造 ModelDirectory，而 cordis 的 Service tracker 会把 service 的 `this.ctx` **重绑到调用方上下文**——所以调用方 fiber 必须自己声明 `remote`。本插件功能一的 `ctx.inject([...])` 只声明了 `slots/modelDirectories/sessions`，于是每次冷解析（新会话、会话切换）都抛未捕获错误；只因 `directoryFor` 开头有「已缓存则早返回」的短路，多数时候命中内核自建目录才没炸出可见故障（竞态相关）。修复：① 在该**子作用域**补声明 `remote` + `remote.session`（两者都要：后者是嵌套追踪服务，只补前者实测错误照旧；刻意都不进 loader entry 的 `inject`，否则会重新引入 v0.4.2 修掉的旧内核 entry 停 PENDING / 五功能全丢）；② 加 `mssResolveDirectory()` 兜底，解析失败不再冒泡成 pageerror，而是降级为「本座位不渲染 + 经 `html[data-ui-tools-model-seat="fallback"]` 把官方控件放回来」，避免「官方被 CSS 隐藏 + 插件座位缺席」两头皆空。同类语义对等插件 `dsh-vision-router` 已有防护代码。回归：compat-check 扩到**四场景 43 断言**（新增场景 D 用「内核不提供 remote」夹住依赖位置；功能一冷解析正向断言），live-smoke 新增 `remote.session` 与**座位真的渲染**两条真机断言（只断言「不报错」不够——兜底会把异常吞成 warn 并静默降级），并修复浏览器探测（原先只认 ms-playwright 写死路径，本机没装 Playwright 时静默 SKIP）。
 - **v0.4.3（历史）**：「修改的文件」支持 **run_code 内嵌工具调用路径提取**——当前 DSH agent 环境的文件操作全部包在 `run_code` 里（工具名恒为 `run_code`，路径藏在 `code` 字符串），旧逻辑按工具名白名单匹配导致这类会话一律显示「0 个文件」。新增 `mfsExtractRunCodePaths`：从 `code` 静态提取 `tools.edit/write/mkdir/move/copy/delete…` 内嵌调用的字面量路径（含字符串数组参数），按内嵌工具映射回白名单 ops，复用去重/徽标/打开链路。字符扫描解析（无正则拼接），反斜杠转义原样保留（Windows 路径不因 `\t`/`\n` 语义被改写）；变量拼接、模板串、shell 级写操作（pwsh `Set-Content`/重定向、gitbash）不计入。compat-check 新增对应断言（当时 33/33 全绿）。
 - **v0.4.2（历史）**：内核版本自适应（软依赖 + 子 fiber 隔离），修复「切到 0.1.1-rc.x 旧内核后 Web UI 顶部 `Failed to load plugins` / `web boot: 1 entry did not activate` 横幅、桌面端反复重载」——根因是入口 `inject` 硬声明了 `0.1.2-alpha.1` 才有的 `uiConversation` / `uiSession`，旧内核无提供方 → 整个 entry 停在 PENDING 被 boot 审计判失败，五个功能一起丢。现在入口只声明五个跨内核服务，功能三的整段注册搬进 `ctx.plugin(alphaFeatures)` 子 fiber（`alphaFeatures.inject` 承载这两个硬依赖），旧内核上子 fiber 静默停在 PENDING、其余四项照常；另加能力探测（子 fiber 激活即置位 `capability.alphaApi`）+ 设置页灰显提示「需内核 0.1.2-alpha.1+」+ 关键调用点形状探测与 try/catch 降级；新增 `tools/compat-check.mjs` 无头回归（真实 cordis，三场景）与 `npm run check`。行为与验收见[内核兼容矩阵](#内核兼容矩阵)。
