@@ -10,12 +10,15 @@
  *   A 旧内核（0.1.1-rc.x，不提供 uiConversation / uiSession）
  *     → entry fiber ACTIVE，boot 审计 0 失败（= 无 `1 entry did not activate`
  *       / 无 Failed to load plugins 横幅）
- *     → alphaFeatures 子 fiber 停在 PENDING、函数体未执行（功能三缺席）
+ *     → alphaFeatures 子 fiber 停在 PENDING、函数体未执行（功能三/六缺席）
  *     → 功能一/二/四/五 的槽位注册全部在位；capability.alphaApi=false（灰显）
- *   B 新内核（0.1.2-alpha.1+，两服务齐备）→ 五个功能全部生效 + 无异常日志；
+ *   B 新内核（0.1.2-alpha.1+，两服务齐备）→ 六个功能全部生效 + 无异常日志；
  *     entry dispose 后子 fiber 随之释放、能力位回落
+ *   B2 功能六（v0.4.6）：精确 TPS 口径与内核同源、Definition 状态机全流程、
+ *     两个组件的 DOM 与偏好门控（直接截取 bundle 源码段执行）
  *   C 服务后到：先按旧内核挂载，随后补上两个服务 → 子 fiber 自动激活补挂
  *     （§10「服务后到时补挂功能」一行，无需轮询）
+ *   D 内核不提供 remote：功能一优雅缺席，entry 仍 ACTIVE（守住 v0.4.2 铁律）
  *
  * 为什么不用真浏览器跑：这些性质（fiber 状态、审计口径、子 fiber 生命周期）
  * 全在 cordis 的依赖解析层，用真 cordis 断言比看 UI 更精确，也不需要重启
@@ -215,6 +218,67 @@ function loadMfsCollector() {
 }
 
 /**
+ * 从 bundle 源码截取功能六取数段，直接测 tsp* 纯函数（不经 VDOM/hooks）。
+ * 与 loadClientBundle 同一份 BUNDLE 源码，保证测的就是被测 bundle。
+ * @returns {{ tspFormatTps: Function, tspEstimateTokens: Function, tspChunkEffort: Function, tspTurnSpeed: Function }}
+ */
+function loadTspSpeed() {
+	const src = fs.readFileSync(BUNDLE, "utf8");
+	const si = src.indexOf("/* ── 功能六取数段");
+	const ei = src.indexOf("/* ── 功能六取数段结束 ── */");
+	if (si < 0 || ei < 0) throw new Error("TPS 取数段定位失败");
+	const depSrc = src.slice(si, ei);
+	// eslint-disable-next-line no-new-func
+	return new Function(depSrc + "\nreturn { tspFormatTps, tspEstimateTokens, tspChunkEffort, tspTurnSpeed };")();
+}
+
+/**
+ * 从 bundle 源码截取功能六的两个组件，用 reactStub 直接调用（不经真 DOM）。
+ * 组件的 DOM 结构与偏好开关门控都能在这里断言 —— 不必依赖真机截图。
+ * @param hooks - 可选 hooks 覆写（例如把 useState 钉成固定时刻，测估算速度）。
+ * @returns {{ TokenSpeedPill: Function, TokenSpeedLive: Function }}
+ */
+function loadTspComponents(hooks = {}) {
+	const src = fs.readFileSync(BUNDLE, "utf8");
+	// 纯函数段与组件段都要（组件调用 tspFormatTps / tspTurnSpeed）。
+	const pureStart = src.indexOf("/* ── 功能六取数段");
+	const pureEnd = src.indexOf("/* ── 功能六取数段结束 ── */");
+	const compStart = src.indexOf("function TokenSpeedPill(props)");
+	const compEnd = src.indexOf("function tspLiveDefinition()");
+	if (pureStart < 0 || pureEnd < 0 || compStart < 0 || compEnd < 0) throw new Error("TPS 组件段定位失败");
+	const depSrc = src.slice(pureStart, pureEnd) + "\n" + src.slice(compStart, compEnd);
+	// 组件只依赖 react、usePrefs（uSES 封装）与上面的纯函数；usePrefs 在 stub 下
+	// 等价于「读快照」，因此把 prefs 仓库直接喂给 useSyncExternalStore 即可。
+	const usePrefs = (prefs) => reactStub.useSyncExternalStore(prefs.subscribe, prefs.getSnapshot);
+	// eslint-disable-next-line no-new-func
+	const factory = new Function("react", "usePrefs", "useState", "useEffect", "useMemo", depSrc
+		+ "\nreturn { TokenSpeedPill, TokenSpeedLive };");
+	return factory(
+		{ ...reactStub, useMemo: (fn) => fn() },
+		usePrefs,
+		hooks.useState ?? reactStub.useState,
+		hooks.useEffect ?? reactStub.useEffect,
+		(fn) => fn()
+	);
+}
+
+/** 极简偏好仓库替身：只需 subscribe/getSnapshot。 */
+function makePrefs(initial) {
+	const state = { ...initial };
+	return { subscribe: () => () => {}, getSnapshot: () => state, __state: state };
+}
+
+/** 把 createElement 的产物递归摊平成可断言的文本摘要。 */
+function flatten(element) {
+	if (element === null || element === void 0 || typeof element === "boolean") return "";
+	if (typeof element === "string" || typeof element === "number") return String(element);
+	if (Array.isArray(element)) return element.map(flatten).join("");
+	// reactStub.createElement 把子节点放在独立的 children 字段（非 props.children）。
+	const inner = element.children === void 0 ? "" : flatten(element.children);
+	return inner;
+}
+
+/**
  * 造一个内核 modelDirectories 服务的替身（v0.4.4）。
  *
  * 为什么要有 `needsRemote` 两态：功能一的取数路径依赖调用方 fiber 声明 `remote`
@@ -319,7 +383,11 @@ function makeKernel({ alpha, withholdRemote = false, ledger, seats }) {
 				target: (name) => (name === "chat"
 					? { getSnapshot: () => FAKE_CHAT_SNAPSHOT, subscribe: () => () => {} }
 					: void 0)
-			})
+			}),
+			// 真内核的 UiConversation 同时提供 events（Definition 通道）与 views。
+			// 功能六的「生成中估算条」走 events.register；这里忠实复刻并记录，
+			// 供断言直接驱动该 Definition 的状态机。
+			events: { register: (definition) => { ledger.definitions.push(definition); return () => {}; } }
 		};
 		services.uiSession = { provide: (def) => { ledger.provided.push(def); return () => {}; } };
 	}
@@ -357,7 +425,7 @@ function fibersOf(ctx, pluginName) {
 /** 挂一个场景：假内核 + 真 bundle entry。 */
 async function mount({ alpha, withholdRemote = false }) {
 	const logs = { error: [], warn: [], info: [], appended: [] };
-	const ledger = { registered: [], provided: [], opened: [], locale: [], directoryCalls: [] };
+	const ledger = { registered: [], provided: [], opened: [], locale: [], directoryCalls: [], definitions: [] };
 	const seats = new Map();
 	const bundle = loadClientBundle(logs);
 	const ctx = new Context();
@@ -518,6 +586,147 @@ section("B. 新内核（两服务齐备）：五个功能全部生效");
 	check("dispose 后 capability.alphaApi 回落 false", setFace?.capability?.getSnapshot().alphaApi === false);
 }
 
+/* ══════════════════════ 场景 B2：功能六 输出速度计（v0.4.6） ══════════════════════ */
+
+section("B2. 功能六：输出速度计（精确 pill + 生成中估算 Definition）");
+{
+	const env = await mount({ alpha: true });
+
+	// ① 精确 pill：注册在 assistant-actions 槽，且 order 为负（排在官方「用时」pill 之前，
+	//    即动作条内紧邻其左侧）。数值口径必须与内核 deriveTurnMetrics 一致。
+	const pill = env.seats.get("conversation.chat.assistant-actions")?.find((row) => row.def.id === "ui-tools-token-speed");
+	check("功能六精确 pill 注册进 conversation.chat.assistant-actions", pill !== void 0,
+		env.ledger.registered.join(", "));
+	check("pill order 为负（渲染在官方「用时」左侧）", pill?.def.order === -10, String(pill?.def.order));
+
+	const speed = loadTspSpeed();
+	// 口径对齐内核：ΣoutputTokens ÷ Σ(completedTime − firstTokenTime)，只计 timing 齐备的 step。
+	{
+		const nodes = [
+			{ kind: "assistant", turn: 1, messageId: "m1", timing: { firstTokenTime: 1000, completedTime: 3000 }, usage: { outputTokens: 100 } },
+			{ kind: "assistant", turn: 1, messageId: "m2", timing: { firstTokenTime: 3000, completedTime: 5000 }, usage: { outputTokens: 200 } },
+			// 同回合但 timing 不全 → 必须被跳过（只累加不完整的会让分母偏大）
+			{ kind: "assistant", turn: 1, messageId: "m3", timing: { completedTime: 9000 }, usage: { outputTokens: 999 } },
+			// 别的回合 → 必须被排除
+			{ kind: "assistant", turn: 2, messageId: "m4", timing: { firstTokenTime: 0, completedTime: 1000 }, usage: { outputTokens: 777 } }
+		];
+		const tps = speed.tspTurnSpeed(nodes, "m2");
+		check("精确口径 = ΣoutputTokens ÷ ΣdecodeMs（跳过 timing 不全/异回合）", tps === 300 / 4,
+			`${String(tps)} 期望 75`);
+	}
+
+	check("无该 messageId 时返回 null（不猜、不显示）", speed.tspTurnSpeed([{ kind: "assistant", turn: 1, messageId: "x", timing: {}, usage: {} }], "nope") === null);
+	check("解码时长为 0 时返回 null（避免除零得 Infinity）",
+		speed.tspTurnSpeed([{ kind: "assistant", turn: 1, messageId: "m1", timing: { firstTokenTime: 5, completedTime: 5 }, usage: { outputTokens: 10 } }], "m1") === null);
+	check("空/非法入参不抛错", speed.tspTurnSpeed(void 0, "m1") === null && speed.tspTurnSpeed(null, null) === null);
+
+	// 显示口径与内核 formatTokensPerSecond 对齐：≥10 取整，否则一位小数。
+	check("TPS 显示口径与内核一致（≥10 取整 / <10 一位小数）",
+		speed.tspFormatTps(42.4) === "42" && speed.tspFormatTps(9.87) === "9.9", `${speed.tspFormatTps(42.4)} / ${speed.tspFormatTps(9.87)}`);
+
+	// 字符→token 折算：CJK 按 1:1，拉丁按 4:1（仅在流式期间使用）。
+	check("流式估算口径：CJK 1字≈1token / 拉丁 4字≈1token",
+		speed.tspEstimateTokens("中文四字") === 4 && speed.tspEstimateTokens("abcd") === 1,
+		`${speed.tspEstimateTokens("中文四字")} / ${speed.tspEstimateTokens("abcd")}`);
+
+	// ② 生成中估算条：走 Definition 通道，必须真的注册、且状态机按契约演进。
+	const live = env.ledger.definitions.find((def) => def.kind === "token-speed-live");
+	check("功能六注册 token-speed-live Definition（生成中估算）", live !== void 0,
+		env.ledger.definitions.map((def) => def.kind).join(", ") || "（无）");
+	check("Definition 声明 target=chat 且带 buildViewNode（内核 assertDefinitionTarget 要求两者成对）",
+		live?.target === "chat" && typeof live?.buildViewNode === "function");
+
+	if (live !== void 0) {
+		const mk = (type, data, seq = 1, time = 1000) => ({ event: { type, data, seq, time, surfaceOp: "append" }, role: "update", location: { kind: "unresolved" } });
+		// 事件匹配面：只认本回合的四个生命周期事件，其余一律 null（不干扰别家 Definition）。
+		check("match 只认 turn/start、step/start、live-chunk、turn/end",
+			live.match({ type: "turn/start", data: { turn: 7 } })?.role === "start"
+			&& live.match({ type: "assistant/live-chunk", data: { turn: 7, chunk: { type: "text-delta", text: "x" } } })?.id === "t7"
+			&& live.match({ type: "tool/call", data: { turn: 7 } }) === null
+			&& live.match({ type: "assistant/message", data: { turn: 7 } }) === null);
+
+		// 状态机：start → 首个输出增量锚定 → 继续累加 → turn/end 后不再产出节点。
+		let state = live.start({}, { event: { type: "turn/start", data: { turn: 7 }, seq: 1, time: 1000 }, role: "start" });
+		check("起始状态无输出（buildViewNode 此时必须返回 null，避免空占位）",
+			live.buildViewNode({ key: "k", kind: "token-speed-live", id: "t7", state, start: void 0 }) === null);
+
+		state = live.update({ state }, mk("assistant/live-chunk", { turn: 7, chunk: { type: "text-delta", text: "你好" } }, 2, 1200));
+		state = live.update({ state }, mk("assistant/live-chunk", { turn: 7, chunk: { type: "reasoning-delta", text: "thinking" } }, 3, 1400));
+		check("流式估算同时累计正文与推理增量（与内核 isTokenDelta 同集合）",
+			state.estTokens > 2 && state.firstTokenAt === 1200, JSON.stringify({ est: state.estTokens, first: state.firstTokenAt }));
+		// 分母只含「真的在解码」的时间：1200→1400 的 200ms 计入；
+		// 1400→9000 的 7.6s 是工具执行等停顿，必须被截断为 GAP_CAP（1000ms）。
+		state = live.update({ state }, mk("assistant/live-chunk", { turn: 7, chunk: { type: "text-delta", text: "后续输出" } }, 4, 9000));
+		check("停顿时长不计入分母（读数不被无输出间隔稀释）",
+			state.activeMs === 200 + 1000, `activeMs=${state.activeMs} 期望 1200`);
+
+		const node = live.buildViewNode({ key: "k", kind: "token-speed-live", id: "t7", state, start: { location: { kind: "unresolved" } } });
+		check("渲染节点 key 稳定且等于 context.key（内核会校验，否则抛 unstable key）",
+			node?.key === "k" && node?.target === "chat" && node?.kind === "token-speed-live");
+		check("渲染节点排在本回合末尾（anchorSeq 大于任何真实事件 seq）",
+			node?.anchorSeq === 2 ** 31, String(node?.anchorSeq));
+
+		const afterEnd = live.update({ state }, mk("turn/end", { turn: 7 }, 4, 5000));
+		check("turn/end 后不再渲染（交棒给精确 pill，不重复显示）",
+			live.buildViewNode({ key: "k", kind: "token-speed-live", id: "t7", state: afterEnd, start: void 0 }) === null);
+
+		// 内核要求 update 永不返回 undefined（requireState 会抛错）。
+		check("缺 start 时 update 返回兜底状态而非 undefined（分页窗口回归钉）",
+			live.update({ state: void 0 }, mk("assistant/live-chunk", { turn: 9, chunk: { type: "text-delta", text: "a" } }, 5, 600)) !== void 0);
+		check("usage / finish chunk 不触发发布（与内核 assistant-step 同规则）",
+			live.publication(mk("assistant/live-chunk", { turn: 7, chunk: { type: "usage", usage: {} } })) === "none"
+			&& live.publication(mk("assistant/live-chunk", { turn: 7, chunk: { type: "finish" } })) === "none"
+			&& live.publication(mk("assistant/live-chunk", { turn: 7, chunk: { type: "text-delta", text: "a" } })) === "animation-frame");
+	}
+
+	// ③ 偏好开关：默认开、可持久化、坏数据回退。
+	check("偏好新增 tokenSpeedEnabled 且默认开",
+		env.seats.get("settings.section")?.[0]?.def.inject().prefs.getSnapshot().tokenSpeedEnabled === true);
+
+	// ④ 组件层：直接调起两个组件，钉住 DOM 结构与开关门控（不必依赖真机截图）。
+	{
+		const { TokenSpeedPill, TokenSpeedLive } = loadTspComponents();
+		const nodes = [
+			{ kind: "assistant", turn: 1, messageId: "m1", timing: { firstTokenTime: 0, completedTime: 4000 }, usage: { outputTokens: 120 } }
+		];
+		const chatSource = { subscribe: () => () => {}, getSnapshot: () => ({ legacy: { nodes } }) };
+		const t = (key, vars) => {
+			const dict = { "tps.exact": "{tps} tok/s", "tps.estimated": "≈ {tps} tok/s", "tps.liveNote": "生成中估算", "tps.title": "T", "tps.liveTitle": "L", "a11y.exact": "a{tps}", "a11y.estimated": "e{tps}" };
+			let text = dict[key] ?? key;
+			for (const name of Object.keys(vars ?? {})) text = text.replace(`{${name}}`, String(vars[name]));
+			return text;
+		};
+
+		const on = makePrefs({ tokenSpeedEnabled: true });
+		const pillEl = TokenSpeedPill({ messageId: "m1", useTspChat: (sel) => sel(chatSource.getSnapshot()), t, prefs: on });
+		check("精确 pill：30 tok/s 按内核口径算出并渲染文案", flatten(pillEl) === "⚡30 tok/s", flatten(pillEl));
+		check("精确 pill：带 data-tsp-pill 与 title/aria（真机选择器与可访问性）",
+			pillEl?.props?.["data-tsp-pill"] === "" && typeof pillEl.props.title === "string" && pillEl.props["aria-label"] === "a30");
+
+		const off = makePrefs({ tokenSpeedEnabled: false });
+		check("精确 pill：开关关闭时渲染 null（不占位）",
+			TokenSpeedPill({ messageId: "m1", useTspChat: (sel) => sel(chatSource.getSnapshot()), t, prefs: off }) === null);
+		check("精确 pill：无 usage 的回合渲染 null（不显示假值）",
+			TokenSpeedPill({ messageId: "missing", useTspChat: (sel) => sel(chatSource.getSnapshot()), t, prefs: on }) === null);
+
+		const liveNode = { data: { turn: 1, startedAt: 0, firstTokenAt: 0, activeMs: 4000, estTokens: 100 } };
+		// 100 token / 4000ms 有效解码 = 25 → 显示「≈ 25 tok/s」。
+		const liveEl = TokenSpeedLive({ node: liveNode, t, prefs: on });
+		check("生成中估算条：标注估算口径（带 ≈ 与「生成中估算」）并渲染",
+			flatten(liveEl).includes("≈ 25 tok/s") && flatten(liveEl).includes("生成中估算"), flatten(liveEl));
+		check("生成中估算条：data-tsp-live + role=status（无障碍播报）",
+			liveEl?.props?.["data-tsp-live"] === "" && liveEl.props.role === "status");
+		check("生成中估算条：开关关闭时渲染 null",
+			TokenSpeedLive({ node: liveNode, t, prefs: off }) === null);
+		check("生成中估算条：无输出数据时渲染 null（不显示 0 tok/s）",
+			TokenSpeedLive({ node: { data: { activeMs: 4000, estTokens: 0 } }, t, prefs: on }) === null);
+		check("生成中估算条：有效解码时间过短（<250ms）时不显示（避免爆表读数）",
+			TokenSpeedLive({ node: { data: { activeMs: 100, estTokens: 100 } }, t, prefs: on }) === null);
+	}
+
+	await env.entryFiber.dispose();
+}
+
 /* ══════════════════════ 场景 C：服务后到 ══════════════════════ */
 
 section("C. 服务后到：子 fiber 自动补挂（无需轮询）");
@@ -573,5 +782,5 @@ for (const row of results) {
 }
 const total = results.filter((row) => !row.section).length;
 console.log(`\n合计 ${total - failed}/${total} 通过（cordis：${located.kernel} → ${path.relative(process.cwd(), located.entry) || located.entry}）`);
-console.log("行为矩阵：新内核 5/5 功能；旧内核 4/5 功能 + 无横幅（功能三缺席属预期降级）");
+console.log("行为矩阵：新内核 6/6 功能；旧内核 4/6 功能 + 无横幅（功能三、六缺席属预期降级）");
 if (failed) process.exitCode = 1;

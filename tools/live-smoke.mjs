@@ -92,7 +92,10 @@ const MARKERS = {
 	collapseBar: "[data-wc-collapse-bar]",
 	chip: "[data-wsc-chip]",
 	settingsRoot: "[data-set-root]",
-	modifiedFiles: "[data-mfs-root]"
+	modifiedFiles: "[data-mfs-root]",
+	// v0.4.6 功能六：精确速度 pill（回合结束后，紧邻「用时」）与生成中估算条。
+	tokenSpeedPill: "[data-tsp-pill]",
+	tokenSpeedLive: "[data-tsp-live]"
 };
 
 const results = [];
@@ -184,9 +187,11 @@ try {
 		}, MARKERS.settingsRoot);
 		check("设置页渲染出 [data-set-root]", !!set);
 		if (set) {
-			check("三个偏好行都在", set.rows.length === 3, set.rows.map((row) => row.label).join(" / "));
+			check("四个偏好行都在", set.rows.length === 4, set.rows.map((row) => row.label).join(" / "));
 			const mfsRow = set.rows.find((row) => row.label.includes("修改的文件"));
 			check("当前内核（alpha.3）下功能三开关不灰显", mfsRow && mfsRow.disabled === false, JSON.stringify(mfsRow ?? null));
+			const tspRow = set.rows.find((row) => row.label.includes("输出速度计"));
+			check("功能六开关在设置页且不灰显（v0.4.6）", tspRow && tspRow.disabled === false, JSON.stringify(tspRow ?? null));
 		}
 		await page.screenshot({ path: path.join(OUT, "02-settings-page.png") });
 	}
@@ -254,6 +259,82 @@ try {
 		}, MARKERS.modifiedFiles);
 		check("视图渲染 [data-mfs-root] 并从 chat target 提取到文件", !!mfs, JSON.stringify(mfs ?? null));
 		await page.screenshot({ path: path.join(OUT, "05-modified-files-tab.png") });
+	}
+
+	console.log("\n2c. 功能六：回合结束后的精确速度 pill（真机取数）");
+	{
+		// 回到「对话」视图：pill 挂在 assistant-actions 动作条上，只在 chat 视图里渲染。
+		const backToChat = await page.evaluate(() => {
+			const rows = [...document.querySelectorAll("button, [role=tab], [role=button]")]
+				.filter((el) => (el.textContent || "").trim() === "对话");
+			if (rows.length) { rows[0].click(); return true; }
+			return false;
+		});
+		await new Promise((r) => setTimeout(r, 2500));
+
+		const pills = await page.evaluate((sel) => {
+			return [...document.querySelectorAll(sel)].map((el) => ({
+				text: (el.textContent || "").trim(),
+				title: el.getAttribute("title") || "",
+				aria: el.getAttribute("aria-label") || ""
+			}));
+		}, MARKERS.tokenSpeedPill);
+
+		// 关键：不直接要求 pill 存在 —— 重载页面后历史回合缺 firstTokenTime，
+		// 内核自己的「本轮用时和速度」弹窗也**不显示 TPS**。因此这里断言的是
+		// 「与内核口径一致」：内核弹窗有 TPS 行则本插件必须有 pill，反之必须没有。
+		const kernelHasTps = await page.evaluate(async () => {
+			const btn = [...document.querySelectorAll("button")].find((b) => /用时|Ran for/.test(b.textContent || ""));
+			if (!btn) return null;
+			btn.click();
+			await new Promise((r) => setTimeout(r, 900));
+			const panel = document.querySelector("[data-turn-time-details]");
+			const text = panel ? panel.textContent || "" : "";
+			// 关掉弹窗，避免影响后续截图
+			document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+			document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+			return { found: panel !== null, hasTps: /输出速度|Tokens per second/.test(text), text: text.slice(0, 80) };
+		});
+
+		if (kernelHasTps === null) {
+			check("（跳过）当前会话无「用时」pill，无法对照内核 TPS 口径", true, "no turn-time pill");
+		} else {
+			console.log(`     内核「用时」弹窗：${JSON.stringify(kernelHasTps)}`);
+			check("功能六 pill 与内核 TPS 口径一致（内核有则必须有，内核无则必须无）",
+				kernelHasTps.hasTps ? pills.length > 0 : pills.length === 0,
+				`kernelHasTps=${kernelHasTps.hasTps} pills=${pills.length}`);
+			check("（跳过，信息）本回合是否可算 TPS", true, kernelHasTps.hasTps ? "可算（pill 应在场）" : "不可算（历史回合缺 firstTokenTime，内核同样不显示）");
+		}
+		if (pills.length > 0) {
+			check("pill 文案形如「N tok/s」", /^\d+(\.\d)? tok\/s$/.test(pills[0].text), pills[0].text);
+			check("pill 带可访问标签", pills[0].aria.length > 0, pills[0].aria);
+			// 位置契约：必须与官方「用量 / 用时」在**同一条动作条**内，且排在「用时」左侧。
+			// （已在 0.1.6-alpha.2 真机实测：pill 位于该行第 2 个子节点、用时之前。）
+			const pos = await page.evaluate((sel) => {
+				const pill = document.querySelector(sel);
+				if (!pill) return null;
+				let row = pill.parentElement;
+				for (let i = 0; i < 6 && row; i += 1) {
+					if ((row.className || "").toString().includes("actions")) break;
+					row = row.parentElement;
+				}
+				if (!row) return null;
+				const kids = [...row.children];
+				const timeEl = kids.find((el) => /用时|Ran for/.test(el.textContent || ""));
+				return {
+					inSameRowAsTime: timeEl !== undefined,
+					toLeftOfTime: timeEl ? pill.getBoundingClientRect().right <= timeEl.getBoundingClientRect().left + 1 : null,
+					index: kids.indexOf(pill)
+				};
+			}, MARKERS.tokenSpeedPill);
+			check("pill 与官方「用时」在同一动作条内、且位于其左侧（「耗时旁边」契约）",
+				pos !== null && pos.inSameRowAsTime === true && pos.toLeftOfTime === true, JSON.stringify(pos));
+		}
+		// 生成中估算条：静态快照下通常已结束，不断言必须存在，只确认没有残留脏节点。
+		const liveCount = await page.evaluate((sel) => document.querySelectorAll(sel).length, MARKERS.tokenSpeedLive);
+		check("回合结束后无残留的生成中估算条（已交棒精确值）", liveCount === 0, String(liveCount));
+		check("（前置）回到对话视图以便读取 pill", backToChat || pills.length > 0, String(backToChat));
+		await page.screenshot({ path: path.join(OUT, "06-token-speed.png") });
 	}
 
 	console.log("\n3. demo 静态预览（灰显两态）");

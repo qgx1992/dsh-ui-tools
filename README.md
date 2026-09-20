@@ -1,6 +1,6 @@
 # dsh-ui-tools
 
-DSH Web 插件：五个 UI 工具合并成一个包，只动对应控件，不改 DSH 任何一行源码。
+DSH Web 插件：六个 UI 工具合并成一个包，只动对应控件，不改 DSH 任何一行源码。
 
 ## 功能一：模型选择双按钮（原 dsh-model-select-style）
 
@@ -52,7 +52,28 @@ DSH Web 插件：五个 UI 工具合并成一个包，只动对应控件，不�
 
 > 存储说明：官方 settings 命名空间需要 host 侧 `ctx.settings.register(ns, schema)` 声明 schema 才能持久化（参考 `ui-theme/src/index.ts`）；本插件刻意保持纯浏览器（`lib/index.js` 空入口、不引入 host 依赖与 schema 校验风险），故沿用浏览器插件社区惯例（同款 `dsh-better-sidebar`）的 localStorage。偏好仅当前浏览器生效；如需跨端/跨浏览器同步，可后续增加 host 半部迁移到 settings 文档。
 
-**实现原理**：注册进官方 **`settings.section`**（root 作用域 list 槽），`id: "dsh-ui-tools"`、`order: 100`、`label` 走双语文案，设置导航自动出现该页。页面组件订阅同一个 localStorage 偏好仓库（`useSyncExternalStore`），所有开关写入即落盘；四个既有功能在 `apply()` 里注入同一偏好仓库：徽章/修改文件组件渲染时读开关，侧边栏折叠条在插件加载时按「默认折叠」偏好执行一次。
+**实现原理**：注册进官方 **`settings.section`**（root 作用域 list 槽），`id: "dsh-ui-tools"`、`order: 100`、`label` 走双语文案，设置导航自动出现该页。页面组件订阅同一个 localStorage 偏好仓库（`useSyncExternalStore`），所有开关写入即落盘；既有功能在 `apply()` 里注入同一偏好仓库：徽章/修改文件组件渲染时读开关，侧边栏折叠条在插件加载时按「默认折叠」偏好执行一次。
+
+## 功能六：输出速度计 tok/s（v0.4.6 新增）
+
+在**回合输出速度**上补一个常驻读数，两个位置：
+
+- **回合结束后（精确值）**：在官方「**用时 xx秒**」pill **左侧**紧邻处显示 `⚡42 tok/s`，无需点开「本轮用时和速度」弹窗即可看到速度；
+- **生成中（估算值）**：回合进行时在消息流末尾显示 `⚡≈ 25 tok/s 生成中估算`，每秒刷新。
+
+数值口径（**精确值**）与内核「本轮用时和速度」弹窗里的 TPS **完全同源**：先按 `messageId` 定位回合，再折叠该回合全部已固化 assistant 节点，只累计**同时带 `timing.firstTokenTime` 与 `usage.outputTokens`** 的 step，按 `ΣoutputTokens ÷ Σ(completedTime − firstTokenTime)` 求值（对应内核 `deriveTurnMetrics` / `assistantStepReading`）；数据不足（无可计步、解码时长为 0）时**不显示**，绝不猜一个假值。
+
+**为什么生成中只能给估算值**：内核在流式期间**不上报 token 数** —— `assistant/live-chunk` 里的 `usage` chunk 被 `publication: "none"` 抑制，不推给客户端。所以生成中按已输出字符折算（CJK 1 字符 ≈ 1 token，其余 4 字符 ≈ 1 token），并**始终带「≈」与「生成中估算」标注**，与精确值明确区分；回合一旦结束即让位给精确 pill，不重复显示。
+
+**实现原理（不改源码的两条官方通道）**：
+
+1. **精确 pill** 注册进官方 list 槽 **`conversation.chat.assistant-actions`**（session 作用域）。该槽的渲染位置就是 `MessageIconActions` 的 `extraActions` 位——**与官方「用时」pill 同一条动作条**，`order: -10` 使其排在官方 pill 之前（内核 list 槽按 `order` 升序渲染），即紧贴「用时」左侧。该槽当前亦被官方 `dsh-client-ui-message-feedback` 使用（`order: 10`），list 槽为加性，无占用冲突。节点数据经 `uiConversation.binding(sessionId).target("chat")` 读 chat target 快照（与官方 `useChat` 同源）。
+2. **生成中估算条** 走官方 Definition 通道 `ctx.uiConversation.events.register(...)`（`ui-goal`、`ui-workflow-run` 同款机制）自建一个 `token-speed-live` chat 节点，并用 `ctx.slots.inject("conversation.chat.node")` 以该 kind 注册渲染器。**为什么不用 `conversation.chat.turnTail`**：该槽的数据源必须匹配到 `turn/end` 才产出节点（`tailData` 无 `turn/end` 即返回 `null`），生成期间根本不存在；`assistant-actions` 所在动作条同理。节点的排序锚点刻意取一个大于任何真实事件 seq 的常量，使其稳定落在本回合末尾（若锚在首个增量处会因 `anchorSeq` 比较跑到流式正文上方）。
+3. Definition 通道是内核对等能力中较新的一个：形状不符时**只让生成中那段缺席**（`console.warn` 记录），绝不抛出——它与功能三同处一个子 fiber，抛错会让 `capability.alphaApi` 回滚、连「修改的文件」一起 FAIL。精确 pill 不依赖该通道。
+
+**开关**：设置页「在「用时」旁显示输出速度计（tok/s）」，默认开；偏好字段 `tokenSpeedEnabled`（同一个 localStorage key）。旧内核上该开关与功能三一同灰显。
+
+> **历史回合为什么可能没有读数**：`firstTokenTime` 来自流式增量（瞬态事件，不进持久化日志），因此**重新加载页面后看到的历史回合**通常缺该字段——此时精确值不可得，插件与内核「用时」弹窗**都不显示 TPS**（同一口径、同一结论）。在本回合刚跑完、未重载页面的情况下读数正常。
 
 ## 实现原理
 
@@ -66,14 +87,14 @@ DSH Web 插件：五个 UI 工具合并成一个包，只动对应控件，不�
 - 工作区徽章注册进 `conversation.session.header.actions`（见功能四）。
 - 设置页注册进 `settings.section`（见功能五）；所有偏好走 apply 期创建的一次性 localStorage 偏好仓库，组件经 `useSyncExternalStore` 订阅。
 
-五个功能各自独立命名空间（locale / slot id / data-* 前缀），互不干扰。
+六个功能各自独立命名空间（locale / slot id / data-* 前缀），互不干扰。
 
 ## 内核兼容矩阵
 
 | DSH 内核 | 入口 fiber | `alphaFeatures` 子 fiber | boot 审计 | 横幅 | 可用功能 |
 |---|---|---|---|---|---|
-| `0.1.2-alpha.1` 及更新¹ | active | active | pass | 无 | 全部 5 项 |
-| `0.1.1-rc.1` / `0.1.1-rc.2` | active | pending（静默） | pass | 无 | 1 / 2 / 4 / 5（功能三缺席，设置页对应开关灰显） |
+| `0.1.2-alpha.1` 及更新¹ | active | active | pass | 无 | 全部 6 项 |
+| `0.1.1-rc.1` / `0.1.1-rc.2` | active | pending（静默） | pass | 无 | 1 / 2 / 4 / 5（功能三与功能六缺席，设置页对应开关灰显） |
 
 > ¹ 「更新」指 **同属 0.1.2-alpha.1 之后的发布线**（`0.1.2-alpha.1` / `0.1.2-*` / `0.1.3-*` / `0.1.5-*` / `0.1.6-*` 及更高）。DSH 的预发布版按 semver 只与**同一 `x.y.z` 元组**比较，所以字面区间 `>=0.1.2-alpha.1` 在真实 semver 下**并不匹配** `0.1.5-rc.2`——本包因此按发布线逐条声明，而不是写一个连续区间，详见下节。
 
@@ -92,18 +113,18 @@ DSH Web 插件：五个 UI 工具合并成一个包，只动对应控件，不�
 - **`-0` 后缀的作用**：`^0.1.1-0` 的下界取该线**最早的预发布**，否则区间会被预发布规则排除。
 - 该区间已对 npm 上全部 21 个已发布内核版本 + 2 个未来哨兵逐项断言，并保证普通 semver 语义与市场侧 `includePrerelease` 语义**判决一致**（见下「自检」）。
 
-> **验证口径**：`node tools/compat-check.mjs` 当前跑在 `0.1.5-rc.2` 内核副本的**真实 cordis** 上（49/49 全绿），断言五个功能的槽位注册、子 fiber 状态与 boot 审计口径；`0.1.2-alpha.3` 为历史验证点。真机（浏览器）行为另由 `tools/live-smoke.mjs` 覆盖，需自备 URL+token。**本仓库未在 `0.1.6-*` 上实测**——该线由 `engines.dsh` 的 `>=0.1.6-0` 声明为预期兼容，尚未验证。
+> **验证口径**：`node tools/compat-check.mjs` 当前跑在 `0.1.6-alpha.2` 内核副本的**真实 cordis** 上（77/77 全绿），断言六个功能的槽位注册、子 fiber 状态与 boot 审计口径；`0.1.5-rc.2` / `0.1.2-alpha.3` 为历史验证点。真机（浏览器）行为另由 `tools/live-smoke.mjs` 覆盖，需自备 URL+token（`0.1.6-alpha.2` 已实测：入口无横幅、六功能标记在位、设置页四行开关均正常）。
 
 ## 自检
 
 ```bash
 node --check lib/client.js       # 语法
-node tools/compat-check.mjs      # 内核自适应回归（真实 cordis，四场景断言）
+node tools/compat-check.mjs      # 内核自适应回归（真实 cordis，四场景 + 功能六组件/口径断言）
 node tools/live-smoke.mjs <URL+token>   # 真机冒烟（可选；自动探测本机 Chrome/Edge）
 # 或一次跑完：npm run check
 ```
 
-`tools/compat-check.mjs` 不开浏览器也不重启服务：它从本机已装内核副本里加载 cordis，搭一个最小宿主把 `lib/client.js` 的 entry 挂上去，在「旧内核 / 新内核 / 服务后到 / 内核不提供 remote」四种场景下复刻 boot 的审计口径（只看 loader entry fiber 是否停在 PENDING），断言入口激活、子 fiber 状态、各槽位注册、`useModifiedFiles` 取数、功能一目录冷解析与设置页能力位。
+`tools/compat-check.mjs` 不开浏览器也不重启服务：它从本机已装内核副本里加载 cordis，搭一个最小宿主把 `lib/client.js` 的 entry 挂上去，在「旧内核 / 新内核 / 服务后到 / 内核不提供 remote」四种场景下复刻 boot 的审计口径（只看 loader entry fiber 是否停在 PENDING），断言入口激活、子 fiber 状态、各槽位注册、`useModifiedFiles` 取数、功能一目录冷解析、设置页能力位，以及**功能六的数值口径、Definition 状态机与两个组件的 DOM/开关门控**（后三项直接截取 bundle 源码段执行，测的就是被测 bundle）。
 
 另含**声明层断言**（场景 0b）：用内核自带的真实 `semver` 校验 `engines.dsh` 覆盖全部已发布内核版本、不误伤未来内核，并保证普通语义与市场侧 `includePrerelease` 语义判决一致——手搓匹配器会把「被测语义」偷换成「我以为的语义」，故不用。可用 `DSH_SEMVER_ENTRY=<...>/semver/index.js` 指定匹配器。
 
@@ -111,7 +132,8 @@ node tools/live-smoke.mjs <URL+token>   # 真机冒烟（可选；自动探测�
 
 ## 变更记录
 
-- **v0.4.5（本次）**：新增**机器可读的内核版本约束** `engines.dsh`（同时写顶层与 `dsh.engines.dsh`，两者值一致），并修正 README 里「`0.1.2-alpha.1` 及更新」这一**在真实 semver 下不成立**的口径。背景：此前本包只在 README 与 `package.json` description 里用自然语言描述内核要求，没有任何字段可供工具读取——而生态实际消费的字段是 `engines.dsh`：`dshmarket` 的 `manifestFacts()` 读它（缺失时回落 `dsh.engines.dsh`），在 Discover 页展示宿主兼容性，并在**安装/更新前拒绝**判定为不兼容的版本。区间写成 `^0.1.1-0 || ^0.1.2-0 || ^0.1.3-0 || ^0.1.5-0 || >=0.1.6-0`：**不能**写成 `>=0.1.1-rc.1` 或 `>=0.1.2-alpha.1`——semver 要求预发布版只匹配**同 `x.y.z`** 区间，实测 `>=0.1.2-alpha.1` 不匹配 `0.1.5-rc.2`（本仓库当前实测内核），`>=0.1.1-rc.1` 也会漏掉 `0.1.2-*` / `0.1.5-*` 各线；逐条 `^0.1.N-0` 覆盖每条已发布线，末项 `>=0.1.6-0` 兜住后续新线且不硬顶未来内核（误判未来内核会让市场拒绝合法升级）。`-0` 后缀用于把下界取到该线最早的预发布。compat-check 新增场景 0b（6 条断言，合计 **49/49**）：用**内核自带真实 semver** 对 npm 上**全部 21 个**已发布内核版本 + 2 个未来哨兵逐项断言，并要求普通语义与市场侧 `includePrerelease` 语义判决一致（偏差即失败）。负向对照有效：把区间换回 `>=0.1.2-alpha.1` 触发 4 条 FAIL（含 `0.1.5-rc.2` 未被自身声明覆盖）。**未改动任何运行期逻辑**（`lib/client.js` 与 v0.4.4 逐字一致）；内核兼容行为与 v0.4.4 相同，当前实测内核 `0.1.5-rc.2`。
+- **v0.4.6（本次）**：新增**功能六「输出速度计 tok/s」**——回合结束后在官方「**用时 xx秒**」pill **左侧**常驻 `⚡42 tok/s`（无需点开「本轮用时和速度」弹窗），生成中在消息流末尾显示 `⚡≈ 25 tok/s 生成中估算`。精确值与内核同源同口径（`ΣoutputTokens ÷ Σ(firstTokenTime→completedTime)`，只计 timing 齐备的 step），生成中因内核流式期间不上报 token 数（`usage` chunk 被 `publication:"none"` 抑制）而按已输出字符折算并明确标注「≈ / 生成中估算」。**位置实现**：精确 pill 走 list 槽 `conversation.chat.assistant-actions`（`order: -10` → 紧贴「用时」左侧，渲染位即 `MessageIconActions.extraActions`）；生成中走官方 Definition 通道 `uiConversation.events.register` 自建 `token-speed-live` chat 节点 + `conversation.chat.node` 渲染器（**`turnTail` 槽在生成期间不渲染** —— 其数据源必须匹配到 `turn/end`，故不能用于实时）。排序锚点用大于任何真实 seq 的常量，避免节点跑到流式正文上方。设置页新增开关 `tokenSpeedEnabled`（默认开，旧内核随功能三一同灰显）。**实现过程中被自测抓到并修复一处真实缺陷**：Definition 通道形状不符时原先直接抛出，会让整个 `alphaFeatures` 子 fiber FAIL、把「修改的文件」一起拖下水 —— 现改为形状探测 + 只让生成中那段缺席。回归：compat-check **49 → 77 断言全绿**（新增数值口径、除零/空入参边界、Definition 状态机全流程、两组件 DOM 与开关门控），负向对照有效（改坏锚点 / 去掉形状守卫各触发 FAIL）；真机 live-smoke 在 `0.1.6-alpha.2` 上通过（入口无横幅、六功能标记在位、设置页四行开关正常，新增功能六断言）。**历史回合可能无读数属预期**：`firstTokenTime` 来自瞬态流式事件、不进持久化日志，重载页面后历史回合的 TPS 内核自身也不显示（同一口径）。`package.json` 版本 `0.4.5 → 0.4.6`。
+- **v0.4.5（历史）**：新增**机器可读的内核版本约束** `engines.dsh`（同时写顶层与 `dsh.engines.dsh`，两者值一致），并修正 README 里「`0.1.2-alpha.1` 及更新」这一**在真实 semver 下不成立**的口径。背景：此前本包只在 README 与 `package.json` description 里用自然语言描述内核要求，没有任何字段可供工具读取——而生态实际消费的字段是 `engines.dsh`：`dshmarket` 的 `manifestFacts()` 读它（缺失时回落 `dsh.engines.dsh`），在 Discover 页展示宿主兼容性，并在**安装/更新前拒绝**判定为不兼容的版本。区间写成 `^0.1.1-0 || ^0.1.2-0 || ^0.1.3-0 || ^0.1.5-0 || >=0.1.6-0`：**不能**写成 `>=0.1.1-rc.1` 或 `>=0.1.2-alpha.1`——semver 要求预发布版只匹配**同 `x.y.z`** 区间，实测 `>=0.1.2-alpha.1` 不匹配 `0.1.5-rc.2`（本仓库当前实测内核），`>=0.1.1-rc.1` 也会漏掉 `0.1.2-*` / `0.1.5-*` 各线；逐条 `^0.1.N-0` 覆盖每条已发布线，末项 `>=0.1.6-0` 兜住后续新线且不硬顶未来内核（误判未来内核会让市场拒绝合法升级）。`-0` 后缀用于把下界取到该线最早的预发布。compat-check 新增场景 0b（6 条断言，合计 **49/49**）：用**内核自带真实 semver** 对 npm 上**全部 21 个**已发布内核版本 + 2 个未来哨兵逐项断言，并要求普通语义与市场侧 `includePrerelease` 语义判决一致（偏差即失败）。负向对照有效：把区间换回 `>=0.1.2-alpha.1` 触发 4 条 FAIL（含 `0.1.5-rc.2` 未被自身声明覆盖）。**未改动任何运行期逻辑**（`lib/client.js` 与 v0.4.4 逐字一致）；内核兼容行为与 v0.4.4 相同，当前实测内核 `0.1.5-rc.2`。
 - **v0.4.4（本次）**：修复**功能一在 0.1.5-rc.1 内核上每次挂载会话抛一次 `cannot get property "remote.session" without inject`**。根因：内核 `ModelDirectoryResolver.directoryFor()` 内部要读 `this.ctx.remote.session` 构造 ModelDirectory，而 cordis 的 Service tracker 会把 service 的 `this.ctx` **重绑到调用方上下文**——所以调用方 fiber 必须自己声明 `remote`。本插件功能一的 `ctx.inject([...])` 只声明了 `slots/modelDirectories/sessions`，于是每次冷解析（新会话、会话切换）都抛未捕获错误；只因 `directoryFor` 开头有「已缓存则早返回」的短路，多数时候命中内核自建目录才没炸出可见故障（竞态相关）。修复：① 在该**子作用域**补声明 `remote` + `remote.session`（两者都要：后者是嵌套追踪服务，只补前者实测错误照旧；刻意都不进 loader entry 的 `inject`，否则会重新引入 v0.4.2 修掉的旧内核 entry 停 PENDING / 五功能全丢）；② 加 `mssResolveDirectory()` 兜底，解析失败不再冒泡成 pageerror，而是降级为「本座位不渲染 + 经 `html[data-ui-tools-model-seat="fallback"]` 把官方控件放回来」，避免「官方被 CSS 隐藏 + 插件座位缺席」两头皆空。同类语义对等插件 `dsh-vision-router` 已有防护代码。回归：compat-check 扩到**四场景 43 断言**（新增场景 D 用「内核不提供 remote」夹住依赖位置；功能一冷解析正向断言），live-smoke 新增 `remote.session` 与**座位真的渲染**两条真机断言（只断言「不报错」不够——兜底会把异常吞成 warn 并静默降级），并修复浏览器探测（原先只认 ms-playwright 写死路径，本机没装 Playwright 时静默 SKIP）。
 - **v0.4.3（历史）**：「修改的文件」支持 **run_code 内嵌工具调用路径提取**——当前 DSH agent 环境的文件操作全部包在 `run_code` 里（工具名恒为 `run_code`，路径藏在 `code` 字符串），旧逻辑按工具名白名单匹配导致这类会话一律显示「0 个文件」。新增 `mfsExtractRunCodePaths`：从 `code` 静态提取 `tools.edit/write/mkdir/move/copy/delete…` 内嵌调用的字面量路径（含字符串数组参数），按内嵌工具映射回白名单 ops，复用去重/徽标/打开链路。字符扫描解析（无正则拼接），反斜杠转义原样保留（Windows 路径不因 `\t`/`\n` 语义被改写）；变量拼接、模板串、shell 级写操作（pwsh `Set-Content`/重定向、gitbash）不计入。compat-check 新增对应断言（当时 33/33 全绿）。
 - **v0.4.2（历史）**：内核版本自适应（软依赖 + 子 fiber 隔离），修复「切到 0.1.1-rc.x 旧内核后 Web UI 顶部 `Failed to load plugins` / `web boot: 1 entry did not activate` 横幅、桌面端反复重载」——根因是入口 `inject` 硬声明了 `0.1.2-alpha.1` 才有的 `uiConversation` / `uiSession`，旧内核无提供方 → 整个 entry 停在 PENDING 被 boot 审计判失败，五个功能一起丢。现在入口只声明五个跨内核服务，功能三的整段注册搬进 `ctx.plugin(alphaFeatures)` 子 fiber（`alphaFeatures.inject` 承载这两个硬依赖），旧内核上子 fiber 静默停在 PENDING、其余四项照常；另加能力探测（子 fiber 激活即置位 `capability.alphaApi`）+ 设置页灰显提示「需内核 0.1.2-alpha.1+」+ 关键调用点形状探测与 try/catch 降级；新增 `tools/compat-check.mjs` 无头回归（真实 cordis，三场景）与 `npm run check`。行为与验收见[内核兼容矩阵](#内核兼容矩阵)。
