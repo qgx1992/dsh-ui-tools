@@ -262,6 +262,65 @@ function loadTspComponents(hooks = {}) {
 	);
 }
 
+/**
+ * 载入**真内核**的 ConversationNodeAssembler（功能六最关键、也是 v0.4.7 漏掉的那一环）。
+ *
+ * 为什么必须用真内核而不是假内核：本插件功能六走 Definition 通道，内核
+ * buildTargetUpserts() 对「上一帧已物化、本帧返回 null」有硬校验并**抛错**，
+ * 该异常会让整条 chat 视图快照链停更（真机症状：回合结束后界面不再刷新、
+ * 后续提问不显示）。假内核没有实现这一校验，因此必须让真内核来判。
+ *
+ * 且真机的流式增量是 transient 记录、回合收尾走 settleAssistant()：
+ * retire transient 后 replayContext 会把状态**倒推**回 firstTokenAt=null /
+ * estTokens=0（并非 ended=true）—— 只测状态机纯函数发现不了这条路径。
+ *
+ * 从本机内核副本读 @deepseek-ai/dsh-client-ui-conversation 的 client bundle，
+ * 捕获 __ModuleLoader__.load 的 factory 并用最小桩执行，拿到未导出的真实类。
+ * @returns {{ ConversationNodeAssembler: Function, kernel: string } | null} 内核缺失时 null。
+ */
+function loadKernelAssembler() {
+	const appData = process.env.APPDATA || path.join(process.env.HOME || "", "AppData", "Roaming");
+	const root = path.join(appData, "DSH-Exoskeleton", "kernels");
+	try { if (!fs.statSync(root).isDirectory()) return null; } catch { return null; }
+	for (const kernel of fs.readdirSync(root).sort().reverse()) {
+		const pnpmDir = path.join(root, kernel, "node_modules", ".pnpm");
+		let rows = [];
+		try { rows = fs.readdirSync(pnpmDir); } catch { continue; }
+		const pkgDir = rows
+			.map((row) => path.join(pnpmDir, row, "node_modules", "@deepseek-ai", "dsh-client-ui-conversation"))
+			.find((dir) => fs.existsSync(path.join(dir, "lib", "client.js")));
+		if (pkgDir === void 0) continue;
+		const code = fs.readFileSync(path.join(pkgDir, "lib", "client.js"), "utf8");
+		let captured = null;
+		// bundle 是浏览器单文件：只喂它用到的全局。
+		// eslint-disable-next-line no-new-func
+		new Function("window", "document", "console", "setTimeout", "clearTimeout", code)(
+			{ __ModuleLoader__: { load: (descriptor) => { captured = descriptor; } } },
+			undefined, console, setTimeout, clearTimeout
+		);
+		if (captured === null) continue;
+		// 内核 bundle 在模块顶层就会用到 memo / jsx 等；缺一个就会在 factory 期抛出，
+		// 而下面的 catch 会把它吞成「找不到内核」。故这里必须补齐形状。
+		const kernelReact = Object.assign({}, reactStub, {
+			memo: (fn) => fn,
+			createElement: () => ({}), jsx: () => ({}), jsxs: () => ({}),
+			useCallback: (fn) => fn, useContext: () => ({}), createContext: () => ({}),
+			forwardRef: (fn) => fn, Fragment: Symbol("Fragment")
+		});
+		try {
+			const mod = captured.factory((id) => {
+				if (id === "@deepseek-ai/cordis") return { Context: Context, Service: Service };
+				if (id === "react" || id === "react/jsx-runtime") return kernelReact;
+				return new Proxy({}, { get: () => () => ({}) });
+			});
+			if (mod && typeof mod.ConversationNodeAssembler === "function") {
+				return { ConversationNodeAssembler: mod.ConversationNodeAssembler, kernel: kernel };
+			}
+		} catch (error) { /* 换下一个内核 */ }
+	}
+	return null;
+}
+
 /** 极简偏好仓库替身：只需 subscribe/getSnapshot。 */
 function makePrefs(initial) {
 	const state = { ...initial };
@@ -666,9 +725,44 @@ section("B2. 功能六：输出速度计（精确 pill + 生成中估算 Definit
 		check("渲染节点排在本回合末尾（anchorSeq 大于任何真实事件 seq）",
 			node?.anchorSeq === 2 ** 31, String(node?.anchorSeq));
 
+		// ⚠ v0.4.7 回归钉：节点一旦物化，就绝不能再返回 null。
+		// 内核 buildTargetUpserts() 对「上一帧已物化、本帧返回 null」直接抛
+		// `conversation Definition "x" withdrew materialized target "chat"`，
+		// 该异常会让整条 chat 视图快照链停更 —— 真机症状为回合结束后界面不再刷新、
+		// 后续提问不显示（0.1.6-alpha.2 / 0.1.7-alpha.1 均已如实复现）。
+		// 正确写法是「同 key + visibility:"hidden"」，由内核按可见性过滤。
 		const afterEnd = live.update({ state }, mk("turn/end", { turn: 7 }, 4, 5000));
-		check("turn/end 后不再渲染（交棒给精确 pill，不重复显示）",
-			live.buildViewNode({ key: "k", kind: "token-speed-live", id: "t7", state: afterEnd, start: void 0 }) === null);
+		const endNode = live.buildViewNode({ key: "k", kind: "token-speed-live", id: "t7", state: afterEnd, start: void 0 });
+		check("turn/end 后让位给精确 pill（不再可见）",
+			endNode !== null && endNode.visibility === "hidden");
+		check("物化后绝不撤回节点（同 key + hidden；返回 null 会被内核判为 withdrew materialized target）",
+			endNode !== null && endNode.key === "k" && endNode.kind === "token-speed-live" && endNode.target === "chat");
+		check("首帧未物化时仍返回 null（此后才受「不可撤回」约束）",
+			live.buildViewNode({ key: "k", kind: "token-speed-live", id: "t7", state: live.start({}, { event: { type: "turn/start", data: { turn: 7 }, seq: 1, time: 1000 }, role: "start" }), start: void 0 }) === null);
+
+		// ⚠⚠ v0.4.7 回归钉（只看 state 修不干净的那个）：真机流式增量是 **transient** 记录，
+		// 回合收尾内核走 settleAssistant()：retire transient 后 **replayContext** 把状态
+		// 倒推回 firstTokenAt=null / estTokens=0（注意：并不是 ended=true）。
+		// 因此「firstTokenAt === null → 返回 null」仍会触发 withdrew 异常。
+		// 唯一可靠判据是内核给的 context.current（上一帧已物化节点）。
+		{
+			const materialized = { key: "k", kind: "token-speed-live", id: "t7", target: "chat", visibility: "visible", data: {} };
+			const current = new Map([["chat", materialized]]);
+			// 状态被 replay 倒推回「尚无输出」——但本 target 已物化过
+			const replayedBack = live.start({}, { event: { type: "turn/start", data: { turn: 7 }, seq: 1, time: 1000 }, role: "start" });
+			const held = live.buildViewNode({ key: "k", kind: "token-speed-live", id: "t7", state: replayedBack, start: void 0, current });
+			check("transient 被 retire 后状态倒推回无输出，但已物化 → 必须返回 hidden 而非 null",
+				held !== null && held.visibility === "hidden", held === null ? "返回了 null → 真机会抛 withdrew" : String(held.visibility));
+			check("该兜底节点仍保持同 key/kind/target（内核会校验 key 稳定）",
+				held?.key === "k" && held?.kind === "token-speed-live" && held?.target === "chat");
+			// state 本身缺失（分页窗口先到 update）但已物化过 → 同样不能返回 null
+			const heldNoState = live.buildViewNode({ key: "k", kind: "token-speed-live", id: "t7", state: void 0, start: void 0, current });
+			check("state 缺失但已物化过 → 仍返回 hidden（不撤回）",
+				heldNoState !== null && heldNoState.visibility === "hidden");
+			// 未物化过 + state 缺失 → 返回 null 安全
+			check("未物化过 + state 缺失 → 返回 null（安全路径）",
+				live.buildViewNode({ key: "k", kind: "token-speed-live", id: "t7", state: void 0, start: void 0, current: new Map() }) === null);
+		}
 
 		// 内核要求 update 永不返回 undefined（requireState 会抛错）。
 		check("缺 start 时 update 返回兜底状态而非 undefined（分页窗口回归钉）",
@@ -725,6 +819,92 @@ section("B2. 功能六：输出速度计（精确 pill + 生成中估算 Definit
 	}
 
 	await env.entryFiber.dispose();
+}
+
+
+/* ══════════════════════ 场景 B3：功能六 × 真内核装配器（v0.4.7） ══════════════════════
+ * 假内核测不到 Definition 的「撤回」硬校验，也测不到 transient→settleAssistant 的
+ * 状态倒推路径 —— 而 v0.4.7 正是漏在这里（修完仍复现「后续提问不显示」）。
+ * 本节把插件真实的 token-speed-live Definition 交给**真内核**的
+ * ConversationNodeAssembler，按真机事件序列（含 transient 增量 + settleAssistant）
+ * 驱动，断言全程不抛错、且节点只在有输出时可见。
+ * ═══════════════════════════════════════════════════════════════════════════════════ */
+section("B3. 功能六 × 真内核 ConversationNodeAssembler（撤回校验 / transient 收尾）");
+{
+	const kernel = loadKernelAssembler();
+	if (kernel === null) {
+		check("本机内核可载入 ConversationNodeAssembler（无内核则本节跳过）", false, "未找到内核副本，无法做真机装配回归");
+	} else {
+		const tspSrc = fs.readFileSync(BUNDLE, "utf8");
+		const pureStart = tspSrc.indexOf("/* ── 功能六取数段");
+		const pureEnd = tspSrc.indexOf("/* ── 功能六取数段结束 ── */");
+		const defStart = tspSrc.indexOf("function tspLiveDefinition()");
+		const defEnd = tspSrc.indexOf("function tspChatSource(ctx, sessionId)");
+		if (pureStart < 0 || pureEnd < 0 || defStart < 0 || defEnd < 0) throw new Error("功能六源码段定位失败");
+		const consts = tspSrc.slice(tspSrc.indexOf("const TSP_LIVE_KIND"), tspSrc.indexOf("const TSP_ZH = {"));
+		// eslint-disable-next-line no-new-func
+		const definition = new Function("console",
+			consts + "\n" + tspSrc.slice(pureStart, pureEnd) + "\n" + tspSrc.slice(defStart, defEnd)
+			+ "\nreturn tspLiveDefinition;")
+		({ warn: () => {}, error: () => {}, log: () => {} })();
+
+		const eventOf = (type, data, seq, extra) => ({ type: type, data: data, seq: seq, time: 1000 + seq, ...(extra ?? {}) });
+		const registry = () => ({ entries: () => [definition], subscribe: () => () => {}, fallbackEntry: () => undefined });
+		// 记录交给目标构建器的每一帧，用于断言「visible ↔ hidden」而不是「节点凭空消失」。
+		const frames = [];
+		const builder = {
+			empty: {},
+			replace(input) { frames.push(input.nodes.map((n) => n.kind + "/" + n.visibility).join(",")); return {}; },
+			apply(input) { frames.push(input.upserts.map((n) => n.kind + "/" + n.visibility).join(",")); return {}; }
+		};
+		const viewRegistry = {
+			entries: () => [{ target: "chat", create: () => builder }],
+			forTarget: (target) => (target === "chat" ? { create: () => builder } : undefined)
+		};
+		const assembler = new kernel.ConversationNodeAssembler(registry(), viewRegistry);
+		assembler.activateTarget("chat");
+		const errors = [];
+		const step = (run) => { try { run(); assembler.flush(); } catch (error) { errors.push(error.message); } };
+
+		const ATT = "attempt-1";
+		step(() => assembler.replaceWindow([
+			{ type: "event", event: eventOf("turn/start", { turn: 1 }, 1) },
+			{ type: "event", event: eventOf("step/start", { turn: 1, step: 0 }, 2) }
+		], false));
+		// 真机的流式增量是 transient（不是 durable event）。
+		step(() => assembler.append({ type: "transient", event: eventOf("assistant/live-chunk", { turn: 1, step: 0, attemptId: ATT, chunk: { type: "text-delta", text: "你好" } }, 3) }));
+		const visibleAfterChunk = frames.some((f) => f.includes("token-speed-live/visible"));
+		check("真内核：流式增量后节点物化为 visible", visibleAfterChunk, frames.join(" | "));
+
+		// 回合收尾：retire transient → replayContext 把状态倒推回「尚无输出」。
+		// v0.4.7 就在这里返回 null → withdrew 异常。
+		step(() => assembler.settleAssistant(ATT, { type: "event", event: eventOf("assistant/message", { turn: 1, step: 0, messageId: "m1", attemptId: ATT }, 4, { surfaceOp: "append" }) }));
+		check("真内核：settleAssistant 收尾不抛 withdrew（撤回校验回归钉）",
+			errors.length === 0, errors.join(" | ") || "无异常");
+		const hiddenAfterSettle = frames.some((f) => f.includes("token-speed-live/hidden"));
+		check("真内核：收尾后节点转为 hidden（让位精确 pill，而非撤回）", hiddenAfterSettle, frames.slice(-4).join(" | "));
+
+		step(() => assembler.append({ type: "event", event: eventOf("turn/end", { turn: 1 }, 5) }));
+
+		// 用户报告的核心症状：回合结束后**后续提问**能不能继续显示。
+		// seq 必须全局严格递增：内核 append() 对已存在的 seq 直接返回 "none" 丢弃，
+		// 用 base+offset 的算术会跨回合撞号（曾因此让本断言的 visible 计数少 1）。
+		let seq = 5;
+		const nextSeq = () => { seq += 1; return seq; };
+		for (const turn of [2, 3]) {
+			step(() => assembler.append({ type: "event", event: eventOf("user/message", { seq: nextSeq(), text: "question " + turn }, seq, { surfaceOp: "append" }) }));
+			step(() => assembler.append({ type: "event", event: eventOf("turn/start", { turn: turn }, nextSeq()) }));
+			step(() => assembler.append({ type: "event", event: eventOf("step/start", { turn: turn, step: 0 }, nextSeq()) }));
+			step(() => assembler.append({ type: "transient", event: eventOf("assistant/live-chunk", { turn: turn, step: 0, attemptId: "att-" + turn, chunk: { type: "text-delta", text: "reply " + turn } }, nextSeq()) }));
+			step(() => assembler.settleAssistant("att-" + turn, { type: "event", event: eventOf("assistant/message", { turn: turn, step: 0, messageId: "m" + turn, attemptId: "att-" + turn }, nextSeq(), { surfaceOp: "append" }) }));
+			step(() => assembler.append({ type: "event", event: eventOf("turn/end", { turn: turn }, nextSeq()) }));
+		}
+		check("真内核：多回合连续会话全程无异常（后续提问正常显示）",
+			errors.length === 0, errors.join(" | ") || "无异常");
+		const visibleFrames = frames.filter((f) => f.includes("token-speed-live/visible")).length;
+		check("真内核：每回合都重新物化出可见读数（visible 帧出现 3 次）",
+			visibleFrames === 3, "visible 帧数=" + visibleFrames);
+	}
 }
 
 /* ══════════════════════ 场景 C：服务后到 ══════════════════════ */
