@@ -263,7 +263,7 @@ function loadTspComponents(hooks = {}) {
 }
 
 /**
- * 载入**真内核**的 ConversationNodeAssembler（功能六最关键、也是 v0.4.7 漏掉的那一环）。
+ * 载入本机**全部可发现**的真内核 ConversationNodeAssembler（功能六最关键的一环）。
  *
  * 为什么必须用真内核而不是假内核：本插件功能六走 Definition 通道，内核
  * buildTargetUpserts() 对「上一帧已物化、本帧返回 null」有硬校验并**抛错**，
@@ -274,31 +274,29 @@ function loadTspComponents(hooks = {}) {
  * retire transient 后 replayContext 会把状态**倒推**回 firstTokenAt=null /
  * estTokens=0（并非 ended=true）—— 只测状态机纯函数发现不了这条路径。
  *
- * 从本机内核副本读 @deepseek-ai/dsh-client-ui-conversation 的 client bundle，
- * 捕获 __ModuleLoader__.load 的 factory 并用最小桩执行，拿到未导出的真实类。
- * @returns {{ ConversationNodeAssembler: Function, kernel: string } | null} 内核缺失时 null。
+ * 返回**数组**（而非首个命中）：不同内核的 Definition 契约可能各自演进，只测
+ * 第一个会让其余版本静默缺席 —— issue #1 正是「桌面版 0.2.0-rc.1 上失效」而
+ * 该版本当时根本不在验证矩阵里。全部跑一遍，任一版本失败都必须显式暴露。
+ *
+ * 两个来源：
+ *   ① $APPDATA/DSH-Exoskeleton/kernels/<ver>/…（托管内核副本，含历史版本）
+ *   ② app.asar 内的 dsh/node_modules/… （桌面版自带内核；大版本升级后真正生效的
+ *      那一份，`kernels/` 下可能没有对应版本）
+ * @returns {Array<{ ConversationNodeAssembler: Function, kernel: string }>} 可发现的内核（可能为空）。
  */
-function loadKernelAssembler() {
-	const appData = process.env.APPDATA || path.join(process.env.HOME || "", "AppData", "Roaming");
-	const root = path.join(appData, "DSH-Exoskeleton", "kernels");
-	try { if (!fs.statSync(root).isDirectory()) return null; } catch { return null; }
-	for (const kernel of fs.readdirSync(root).sort().reverse()) {
-		const pnpmDir = path.join(root, kernel, "node_modules", ".pnpm");
-		let rows = [];
-		try { rows = fs.readdirSync(pnpmDir); } catch { continue; }
-		const pkgDir = rows
-			.map((row) => path.join(pnpmDir, row, "node_modules", "@deepseek-ai", "dsh-client-ui-conversation"))
-			.find((dir) => fs.existsSync(path.join(dir, "lib", "client.js")));
-		if (pkgDir === void 0) continue;
-		const code = fs.readFileSync(path.join(pkgDir, "lib", "client.js"), "utf8");
+function loadKernelAssemblers() {
+	/** 从一个 client bundle 源码里取出真内核的 ConversationNodeAssembler。 */
+	const fromSource = (code, label) => {
 		let captured = null;
-		// bundle 是浏览器单文件：只喂它用到的全局。
-		// eslint-disable-next-line no-new-func
-		new Function("window", "document", "console", "setTimeout", "clearTimeout", code)(
-			{ __ModuleLoader__: { load: (descriptor) => { captured = descriptor; } } },
-			undefined, console, setTimeout, clearTimeout
-		);
-		if (captured === null) continue;
+		try {
+			// bundle 是浏览器单文件：只喂它用到的全局。
+			// eslint-disable-next-line no-new-func
+			new Function("window", "document", "console", "setTimeout", "clearTimeout", code)(
+				{ __ModuleLoader__: { load: (descriptor) => { captured = descriptor; } } },
+				undefined, console, setTimeout, clearTimeout
+			);
+		} catch (error) { return null; }
+		if (captured === null) return null;
 		// 内核 bundle 在模块顶层就会用到 memo / jsx 等；缺一个就会在 factory 期抛出，
 		// 而下面的 catch 会把它吞成「找不到内核」。故这里必须补齐形状。
 		const kernelReact = Object.assign({}, reactStub, {
@@ -314,14 +312,68 @@ function loadKernelAssembler() {
 				return new Proxy({}, { get: () => () => ({}) });
 			});
 			if (mod && typeof mod.ConversationNodeAssembler === "function") {
-				return { ConversationNodeAssembler: mod.ConversationNodeAssembler, kernel: kernel };
+				return { ConversationNodeAssembler: mod.ConversationNodeAssembler, kernel: label };
 			}
-		} catch (error) { /* 换下一个内核 */ }
-	}
-	return null;
-}
+		} catch (error) { /* 换下一个来源 */ }
+		return null;
+	};
 
-/** 极简偏好仓库替身：只需 subscribe/getSnapshot。 */
+	const found = [];
+	// 来源 ①：本机内核副本（$APPDATA/DSH-Exoskeleton/kernels/<ver>/…）。
+	const appData = process.env.APPDATA || path.join(process.env.HOME || "", "AppData", "Roaming");
+	const root = path.join(appData, "DSH-Exoskeleton", "kernels");
+	let kernels = [];
+	try { kernels = fs.readdirSync(root).sort().reverse(); } catch { kernels = []; }
+	for (const kernel of kernels) {
+		const pnpmDir = path.join(root, kernel, "node_modules", ".pnpm");
+		let rows = [];
+		try { rows = fs.readdirSync(pnpmDir); } catch { continue; }
+		const pkgDir = rows
+			.map((row) => path.join(pnpmDir, row, "node_modules", "@deepseek-ai", "dsh-client-ui-conversation"))
+			.find((dir) => fs.existsSync(path.join(dir, "lib", "client.js")));
+		if (pkgDir === void 0) continue;
+		const hit = fromSource(fs.readFileSync(path.join(pkgDir, "lib", "client.js"), "utf8"), kernel);
+		if (hit !== null) found.push(hit);
+	}
+
+	// 来源 ②：桌面版自带的内核（打包在 app.asar 内，**不在** kernels 目录）。
+	// asar 头部是 JSON 目录表，条目 offset 相对「16 + headerSize」的数据区。
+	const asarPath = path.join(
+		process.env.LOCALAPPDATA || path.join(process.env.HOME || "", "AppData", "Local"),
+		"Programs", "DeepSeek Harness", "resources", "app.asar"
+	);
+	try {
+		const fd = fs.openSync(asarPath, "r");
+		try {
+			const head = Buffer.alloc(16);
+			fs.readSync(fd, head, 0, 16, 0);
+			const headerSize = head.readUInt32LE(12);
+			const hbuf = Buffer.alloc(headerSize);
+			fs.readSync(fd, hbuf, 0, headerSize, 16);
+			const header = JSON.parse(hbuf.toString("utf8"));
+			const baseOffset = 16 + headerSize;
+			const target = ["dsh", "node_modules", "@deepseek-ai", "dsh-client-ui-conversation", "lib", "client.js"];
+			let node = header;
+			for (const part of target) {
+				node = node && node.files ? node.files[part] : void 0;
+				if (node === void 0) break;
+			}
+			if (node !== void 0 && typeof node.size === "number") {
+				const buf = Buffer.alloc(node.size);
+				fs.readSync(fd, buf, 0, node.size, baseOffset + Number(node.offset));
+				// asar 条目前可能有 1..n 字节对齐填充；从 __ModuleLoader__ 处起算。
+				const code = buf.toString("utf8");
+				const at = code.indexOf("window.__ModuleLoader__");
+				if (at >= 0) {
+					const hit = fromSource(code.slice(at), "app.asar");
+					if (hit !== null) found.push(hit);
+				}
+			}
+		} finally { fs.closeSync(fd); }
+	} catch (error) { /* asar 不存在或结构不同：静默跳过 */ }
+
+	return found;
+}/** 极简偏好仓库替身：只需 subscribe/getSnapshot。 */
 function makePrefs(initial) {
 	const state = { ...initial };
 	return { subscribe: () => () => {}, getSnapshot: () => state, __state: state };
@@ -526,18 +578,27 @@ check("bundle 只 require react（client 模块表铁律）",
 	if (semver === null) {
 		check("本机找到 semver（声明层断言需要真实语义）", false, "可用 DSH_SEMVER_ENTRY=<...>/semver/index.js 指定");
 	} else {
-		// npm 上**全部**已发布内核版本（@deepseek-ai/dsh，21 个）+ 2 个「未来」哨兵。
+		// npm 上**全部 29 个**已发布内核版本（@deepseek-ai/dsh）+ 3 个「未来」哨兵。
 		// 逐项硬编码期望值，而不是按区间反推——否则断言退化成同义反复。
+		//
+		// ⚠ v0.4.8：此前只列了 21 个，**漏掉 0.1.6-alpha.2 / 0.1.5-rc.3以及整条 0.1.7/0.2.0 线**
+		// （0.1.7-alpha.1 / 0.1.7-alpha.2 / 0.1.7-rc.1 / 0.1.7-rc.2 / 0.2.0-rc.1 / 0.2.0-rc.2）。
+		// 漏项让「两种 semver 语义判决一致」这条断言**假绿**：旧区间 `>=0.1.6-0` 在普通语义下
+		// 不覆盖任何 0.1.7-*/0.2.0-* 预发布版（只在 includePrerelease 下才 true），恰是 6 条分流。
+		// 现按发布线逐条声明并全量列表，令该类裂缝无处可藏（issue #1 暴露的正是这个缺口）。
 		const KERNELS = [
 			["0.0.1-rc.1", false], ["0.0.1-rc.2", false], ["0.0.1-rc.5", false],
 			["0.1.0-rc.2", false], ["0.1.0-rc.3", false], ["0.1.0-rc.6", false], ["0.1.0-rc.7", false], ["0.1.0-rc.8", false],
 			["0.1.1-rc.1", true], ["0.1.1-rc.2", true],
 			["0.1.2-alpha.2", true], ["0.1.2-alpha.3", true], ["0.1.2-alpha.4", true], ["0.1.2-alpha.5", true],
 			["0.1.2-rc.1", true], ["0.1.3-alpha.2", true],
-			["0.1.5-alpha.1", true], ["0.1.5-alpha.2", true], ["0.1.5-rc.1", true], ["0.1.5-rc.2", true],
-			["0.1.6-alpha.1", true],
+			["0.1.5-alpha.1", true], ["0.1.5-alpha.2", true], ["0.1.5-rc.1", true], ["0.1.5-rc.2", true], ["0.1.5-rc.3", true],
+			["0.1.6-alpha.1", true], ["0.1.6-alpha.2", true],
+			// 0.1.7 / 0.2.0 线：旧区间在普通语义下**全部漏判**（只在 includePrerelease 下成立）。
+			["0.1.7-alpha.1", true], ["0.1.7-alpha.2", true], ["0.1.7-rc.1", true], ["0.1.7-rc.2", true],
+			["0.2.0-rc.1", true], ["0.2.0-rc.2", true],
 			// 未发布：钉住「不硬顶未来内核」（误判会让 dshmarket 拒绝合法升级）
-			["0.2.0", true], ["1.0.0", true]
+			["0.2.0", true], ["0.3.0-rc.1", true], ["1.0.0", true]
 		];
 		// 普通语义与市场语义（includePrerelease）必须逐项一致：两者不一致意味着
 		// 声明在市场里和在本地 semver 下判决不同，是无声的兼容性裂缝。
@@ -547,7 +608,7 @@ check("bundle 只 require react（client 模块表铁律）",
 			divergent.length === 0, divergent.map(([v]) => v).join(", ") || "一致");
 
 		const wrong = KERNELS.filter(([v, want]) => semver.satisfies(v, declared) !== want);
-		check(`区间覆盖全部已发布内核（21 个）+ 2 个未来哨兵`,
+		check(`区间覆盖全部已发布内核（29 个）+ 3 个未来哨兵`,
 			wrong.length === 0,
 			wrong.length ? wrong.map(([v, want]) => `${v} 期望 ${want} 实得 ${!want}`).join(", ")
 				: "0.0.1-rc.1 → 1.0.0 逐项全对");
@@ -706,8 +767,18 @@ section("B2. 功能六：输出速度计（精确 pill + 生成中估算 Definit
 
 		// 状态机：start → 首个输出增量锚定 → 继续累加 → turn/end 后不再产出节点。
 		let state = live.start({}, { event: { type: "turn/start", data: { turn: 7 }, seq: 1, time: 1000 }, role: "start" });
-		check("起始状态无输出（buildViewNode 此时必须返回 null，避免空占位）",
-			live.buildViewNode({ key: "k", kind: "token-speed-live", id: "t7", state, start: void 0 }) === null);
+		// ⚠ v0.4.8：能不能返回 null 取决于「能否证明从未物化」，两种情形分开钉。
+		// ① 内核给了可读的 context.current 且该 target 为空 → 确认未物化 → null 安全（避免空占位）。
+		check("起始状态无输出且已确认未物化（current 可读且为空）→ 返回 null 避免空占位",
+			live.buildViewNode({ key: "k", kind: "token-speed-live", id: "t7", state, start: void 0, current: new Map() }) === null);
+		// ② 读不到 context.current → **无法证明**未物化 → 保守返回 hidden（issue #1 指出的不可区分性）。
+		//    宁可多挂一帧隐藏节点，也不能误判 previous=null 而触发撤回异常。
+		{
+			const unknownShape = live.buildViewNode({ key: "k", kind: "token-speed-live", id: "t7", state, start: void 0 });
+			check("读不到 context.current 时保守返回同 key + hidden（不敢断言未物化）",
+				unknownShape !== null && unknownShape.visibility === "hidden" && unknownShape.key === "k",
+				unknownShape === null ? "返回了 null → 形态变化时会静默复现撤回异常" : String(unknownShape.visibility));
+		}
 
 		state = live.update({ state }, mk("assistant/live-chunk", { turn: 7, chunk: { type: "text-delta", text: "你好" } }, 2, 1200));
 		state = live.update({ state }, mk("assistant/live-chunk", { turn: 7, chunk: { type: "reasoning-delta", text: "thinking" } }, 3, 1400));
@@ -737,8 +808,9 @@ section("B2. 功能六：输出速度计（精确 pill + 生成中估算 Definit
 			endNode !== null && endNode.visibility === "hidden");
 		check("物化后绝不撤回节点（同 key + hidden；返回 null 会被内核判为 withdrew materialized target）",
 			endNode !== null && endNode.key === "k" && endNode.kind === "token-speed-live" && endNode.target === "chat");
-		check("首帧未物化时仍返回 null（此后才受「不可撤回」约束）",
-			live.buildViewNode({ key: "k", kind: "token-speed-live", id: "t7", state: live.start({}, { event: { type: "turn/start", data: { turn: 7 }, seq: 1, time: 1000 }, role: "start" }), start: void 0 }) === null);
+		const freshStart = live.start({}, { event: { type: "turn/start", data: { turn: 7 }, seq: 1, time: 1000 }, role: "start" });
+		check("首帧未物化且已确认（current 可读且为空）→ 返回 null",
+			live.buildViewNode({ key: "k", kind: "token-speed-live", id: "t7", state: freshStart, start: void 0, current: new Map() }) === null);
 
 		// ⚠⚠ v0.4.7 回归钉（只看 state 修不干净的那个）：真机流式增量是 **transient** 记录，
 		// 回合收尾内核走 settleAssistant()：retire transient 后 **replayContext** 把状态
@@ -825,16 +897,23 @@ section("B2. 功能六：输出速度计（精确 pill + 生成中估算 Definit
 /* ══════════════════════ 场景 B3：功能六 × 真内核装配器（v0.4.7） ══════════════════════
  * 假内核测不到 Definition 的「撤回」硬校验，也测不到 transient→settleAssistant 的
  * 状态倒推路径 —— 而 v0.4.7 正是漏在这里（修完仍复现「后续提问不显示」）。
- * 本节把插件真实的 token-speed-live Definition 交给**真内核**的
+ * 本节把插件真实的 token-speed-live Definition 交给**每一个可发现的真内核**的
  * ConversationNodeAssembler，按真机事件序列（含 transient 增量 + settleAssistant）
  * 驱动，断言全程不抛错、且节点只在有输出时可见。
+ *
+ * 覆盖来源：$APPDATA/DSH-Exoskeleton/kernels/* 各副本 + app.asar 内桌面版自带内核。
+ * **逐个内核各跑一遍**：任一版本失效都必须显式 FAIL，不能只测第一个。
  * ═══════════════════════════════════════════════════════════════════════════════════ */
-section("B3. 功能六 × 真内核 ConversationNodeAssembler（撤回校验 / transient 收尾）");
+section("B3. 功能六 × 真内核 ConversationNodeAssembler（撤回校验 / transient 收尾，逐内核）");
 {
-	const kernel = loadKernelAssembler();
-	if (kernel === null) {
+	const kernels = loadKernelAssemblers();
+	if (kernels.length === 0) {
 		check("本机内核可载入 ConversationNodeAssembler（无内核则本节跳过）", false, "未找到内核副本，无法做真机装配回归");
-	} else {
+	}
+	// 逐个内核跑同一套真机时序：任一版本失效都必须显式 FAIL，
+	// 而不是「只测第一个、其余静默缺席」（issue #1 的 0.2.0-rc.1 就是这样漏掉的）。
+	for (const kernel of kernels) {
+		const KL = "[" + kernel.kernel + "] ";
 		const tspSrc = fs.readFileSync(BUNDLE, "utf8");
 		const pureStart = tspSrc.indexOf("/* ── 功能六取数段");
 		const pureEnd = tspSrc.indexOf("/* ── 功能六取数段结束 ── */");
@@ -874,15 +953,15 @@ section("B3. 功能六 × 真内核 ConversationNodeAssembler（撤回校验 / t
 		// 真机的流式增量是 transient（不是 durable event）。
 		step(() => assembler.append({ type: "transient", event: eventOf("assistant/live-chunk", { turn: 1, step: 0, attemptId: ATT, chunk: { type: "text-delta", text: "你好" } }, 3) }));
 		const visibleAfterChunk = frames.some((f) => f.includes("token-speed-live/visible"));
-		check("真内核：流式增量后节点物化为 visible", visibleAfterChunk, frames.join(" | "));
+		check(KL + "真内核：流式增量后节点物化为 visible", visibleAfterChunk, frames.join(" | "));
 
 		// 回合收尾：retire transient → replayContext 把状态倒推回「尚无输出」。
 		// v0.4.7 就在这里返回 null → withdrew 异常。
 		step(() => assembler.settleAssistant(ATT, { type: "event", event: eventOf("assistant/message", { turn: 1, step: 0, messageId: "m1", attemptId: ATT }, 4, { surfaceOp: "append" }) }));
-		check("真内核：settleAssistant 收尾不抛 withdrew（撤回校验回归钉）",
+		check(KL + "真内核：settleAssistant 收尾不抛 withdrew（撤回校验回归钉）",
 			errors.length === 0, errors.join(" | ") || "无异常");
 		const hiddenAfterSettle = frames.some((f) => f.includes("token-speed-live/hidden"));
-		check("真内核：收尾后节点转为 hidden（让位精确 pill，而非撤回）", hiddenAfterSettle, frames.slice(-4).join(" | "));
+		check(KL + "真内核：收尾后节点转为 hidden（让位精确 pill，而非撤回）", hiddenAfterSettle, frames.slice(-4).join(" | "));
 
 		step(() => assembler.append({ type: "event", event: eventOf("turn/end", { turn: 1 }, 5) }));
 
@@ -899,10 +978,10 @@ section("B3. 功能六 × 真内核 ConversationNodeAssembler（撤回校验 / t
 			step(() => assembler.settleAssistant("att-" + turn, { type: "event", event: eventOf("assistant/message", { turn: turn, step: 0, messageId: "m" + turn, attemptId: "att-" + turn }, nextSeq(), { surfaceOp: "append" }) }));
 			step(() => assembler.append({ type: "event", event: eventOf("turn/end", { turn: turn }, nextSeq()) }));
 		}
-		check("真内核：多回合连续会话全程无异常（后续提问正常显示）",
+		check(KL + "真内核：多回合连续会话全程无异常（后续提问正常显示）",
 			errors.length === 0, errors.join(" | ") || "无异常");
 		const visibleFrames = frames.filter((f) => f.includes("token-speed-live/visible")).length;
-		check("真内核：每回合都重新物化出可见读数（visible 帧出现 3 次）",
+		check(KL + "真内核：每回合都重新物化出可见读数（visible 帧出现 3 次）",
 			visibleFrames === 3, "visible 帧数=" + visibleFrames);
 	}
 }
