@@ -8,3 +8,6 @@ AGENT.md
 
 # 视觉工具产物（临时裁剪/标注图，不推送）
 .dsh-vision-router/
+
+# 一次性排障脚本（本机保留，不进仓库）
+.scratch/

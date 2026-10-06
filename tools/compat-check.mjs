@@ -7,18 +7,22 @@
  * 验证 docs/UI-TOOLS-KERNEL-ADAPT-DESIGN.md §4 的行为矩阵：
  *
  *   0 声明层：入口 inject 只剩五个跨内核服务；bundle 只 require react
- *   A 旧内核（0.1.1-rc.x，不提供 uiConversation / uiSession）
+ *   A 旧内核（0.1.1-rc.x，不提供 uiConversation）
  *     → entry fiber ACTIVE，boot 审计 0 失败（= 无 `1 entry did not activate`
  *       / 无 Failed to load plugins 横幅）
- *     → alphaFeatures 子 fiber 停在 PENDING、函数体未执行（功能三/六缺席）
- *     → 功能一/二/四/五 的槽位注册全部在位；capability.alphaApi=false（灰显）
- *   B 新内核（0.1.2-alpha.1+，两服务齐备）→ 六个功能全部生效 + 无异常日志；
+ *     → alphaFeatures 子 fiber 停在 PENDING、函数体未执行（功能五缺席）
+ *     → 功能一/二/三/四 的槽位注册全部在位；capability.alphaApi=false（灰显）
+ *   B 新内核（0.1.2-alpha.1+，提供 uiConversation）→ 五个功能全部生效 + 无异常日志；
  *     entry dispose 后子 fiber 随之释放、能力位回落
- *   B2 功能六（v0.4.6）：精确 TPS 口径与内核同源、Definition 状态机全流程、
+ *   B2 功能五（v0.4.6）：精确 TPS 口径与内核同源、Definition 状态机全流程、
  *     两个组件的 DOM 与偏好门控（直接截取 bundle 源码段执行）
- *   C 服务后到：先按旧内核挂载，随后补上两个服务 → 子 fiber 自动激活补挂
+ *   C 服务后到：先按旧内核挂载，随后补上服务 → 子 fiber 自动激活补挂
  *     （§10「服务后到时补挂功能」一行，无需轮询）
  *   D 内核不提供 remote：功能一优雅缺席，entry 仍 ACTIVE（守住 v0.4.2 铁律）
+ *
+ * v0.4.9：功能三「修改的文件」tab 已移除，本文件同步去掉其全部断言，
+ * 并新增「conversation.view 永不被注册」「uiSession.provide 永不被调用」
+ * 「workspaces.openPath 永不被调用」三条**逆向钉**，防止残留代码复活。
  *
  * 为什么不用真浏览器跑：这些性质（fiber 状态、审计口径、子 fiber 生命周期）
  * 全在 cordis 的依赖解析层，用真 cordis 断言比看 UI 更精确，也不需要重启
@@ -190,6 +194,9 @@ function loadClientBundle(logs) {
 const FAKE_CWD = "C:/ws/demo";
 /** 内核 remote.session 命名空间的替身；调用方没声明 remote 时 cordis tracker 会在取它之前抛错。 */
 const FAKE_REMOTE_SESSION = { selectModel: () => Promise.resolve() };
+/** 会话内容快照（chat target 的 legacy 形状）。功能三移除后，仍被功能六的
+ *  chat 快照源（tspChatSource）断言使用；保留 tool-call 节点是为了让快照形状
+ *  与真内核一致，避免假数据比真实更宽松。 */
 const FAKE_CHAT_SNAPSHOT = {
 	legacy: {
 		nodes: [
@@ -204,18 +211,6 @@ await tools.mkdir({ dirs: ["src/nested", "src/empty"] });` }) }
 		runningCalls: []
 	}
 };
-
-/** 从 bundle 源码截取 MFS 提取段，直接测 collectModifiedFiles（不经 VDOM/hooks）。
- *  与 loadClientBundle 同一份 BUNDLE 源码，保证测的就是被测 bundle。 */
-function loadMfsCollector() {
-	const src = fs.readFileSync(BUNDLE, "utf8");
-	const si = src.indexOf("/* 会改动文件系统的工具");
-	const ei = src.indexOf("\t\t/** 展示用相对路径");
-	if (si < 0 || ei < 0) throw new Error("MFS 提取段定位失败");
-	const depSrc = src.slice(si, ei);
-	// eslint-disable-next-line no-new-func
-	return new Function(depSrc + "\nreturn collectModifiedFiles;")();
-}
 
 /**
  * 从 bundle 源码截取功能六取数段，直接测 tsp* 纯函数（不经 VDOM/hooks）。
@@ -626,7 +621,7 @@ check("bundle 只 require react（client 模块表铁律）",
 
 /* ══════════════════════ 场景 A：旧内核 0.1.1-rc.x ══════════════════════ */
 
-section("A. 旧内核（无 uiConversation / uiSession）：静默降级");
+section("A. 旧内核（无 uiConversation）：静默降级");
 {
 	const env = await mount({ alpha: false });
 	check("entry fiber = ACTIVE（入口不再卡死）", env.entryFiber.state === FIBER.ACTIVE, stateOf(env.entryFiber));
@@ -636,7 +631,7 @@ section("A. 旧内核（无 uiConversation / uiSession）：静默降级");
 	check("alphaFeatures 子 fiber 已创建", alpha.length === 1, String(alpha.length));
 	check("子 fiber 停在 PENDING（不报错、不计入审计）", alpha[0]?.state === FIBER.PENDING, stateOf(alpha[0]));
 	check("未调用 ctx.uiSession.provide（函数体确实没执行）", env.ledger.provided.length === 0, String(env.ledger.provided.length));
-	check("功能三缺席：没有注册 conversation.view", env.ledger.registered.every((row) => !row.startsWith("conversation.view/")), env.ledger.registered.join(", "));
+	check("功能三已移除：任何内核都不再注册 conversation.view", env.ledger.registered.every((row) => !row.startsWith("conversation.view/")), env.ledger.registered.join(", "));
 
 	for (const [label, seat] of [
 		["功能一 模型双按钮", "conversation.input.right/ui-tools-model-seat"],
@@ -649,29 +644,28 @@ section("A. 旧内核（无 uiConversation / uiSession）：静默降级");
 
 	const setFace = faceAt(env.seats, "settings.section");
 	check("设置页 inject 暴露 capability 仓库", typeof setFace?.capability?.getSnapshot === "function");
-	check("capability.alphaApi = false → 功能三开关灰显", setFace?.capability?.getSnapshot().alphaApi === false);
-	check("灰显提示文案标注所需内核", /0\.1\.2-alpha\.1/.test(setFace?.t?.("mfs.unavailable") ?? ""), setFace?.t?.("mfs.unavailable") ?? "（无文案）");
+	check("capability.alphaApi = false → 速度计开关灰显", setFace?.capability?.getSnapshot().alphaApi === false);
+	check("灰显提示文案标注所需内核", /0\.1\.2-alpha\.1/.test(setFace?.t?.("alpha.unavailable") ?? ""), setFace?.t?.("alpha.unavailable") ?? "（无文案）");
+	check("设置页不再含功能三开关文案（mfs.compact 已随功能三移除）",
+		setFace?.t?.("mfs.compact") === "mfs.compact", String(setFace?.t?.("mfs.compact")));
 	check("控制台无 dsh-ui-tools 异常（旧内核静默）", env.logs.error.length === 0, env.logs.error.join(" | ") || "clean");
 	await env.entryFiber.dispose();
 }
 
 /* ══════════════════════ 场景 B：新内核 0.1.2-alpha.1+ ══════════════════════ */
 
-section("B. 新内核（两服务齐备）：五个功能全部生效");
+section("B. 新内核（提供 uiConversation）：五个功能全部生效");
 {
 	const env = await mount({ alpha: true });
 	check("boot 审计 0 失败", env.failures.length === 0, env.failures.join(" | ") || "pass");
 	check("alphaFeatures 子 fiber = ACTIVE", fibersOf(env.ctx, "alphaFeatures")[0]?.state === FIBER.ACTIVE, stateOf(fibersOf(env.ctx, "alphaFeatures")[0]));
-	check("功能三注册进 conversation.view（order 20）",
-		env.ledger.registered.includes("conversation.view/ui-tools-modified-files")
-		&& env.seats.get("conversation.view")?.[0]?.def.order === 20,
+	check("功能三已移除：新内核上也不再注册 conversation.view",
+		!env.ledger.registered.some((row) => row.startsWith("conversation.view/")),
 		env.ledger.registered.join(", "));
-	check("注册 useModifiedFiles 标准 hook", (env.ledger.provided[0]?.hooks ?? []).includes("modifiedFiles"), JSON.stringify(env.ledger.provided[0]?.hooks ?? null));
-
-	const viewFace = env.seats.get("conversation.view")?.[0]?.def.inject("s1");
-	check("子 fiber 内仍能读跨内核服务（sessions 快照 cwd）", viewFace?.cwd === FAKE_CWD, String(viewFace?.cwd));
-	await viewFace?.openFile("src/a.ts");
-	check("openFile 经 workspaces.openPath 打开绝对路径", env.ledger.opened.includes(`${FAKE_CWD}/src/a.ts`), env.ledger.opened.join(", "));
+	check("功能三已移除：不再调用 uiSession.provide（useModifiedFiles 随之消失）",
+		env.ledger.provided.length === 0, String(env.ledger.provided.length));
+	check("功能三已移除：不再调用 workspaces.openPath（openFile 链路已删）",
+		env.ledger.opened.length === 0, env.ledger.opened.join(", ") || "（无调用）");
 
 	// v0.4.4：功能一必须能「冷」解析出目录 —— 内核 directoryFor() 在**调用方**上下文里读
 	// remote.session（Service tracker 重绑 this.ctx），插件少声明 remote 就会抛错。
@@ -684,21 +678,8 @@ section("B. 新内核（两服务齐备）：五个功能全部生效");
 			env.ledger.directoryCalls.includes("s1"), env.ledger.directoryCalls.join(", ") || "（无调用）");
 	}
 
-	const hook = env.ledger.provided[0]?.resolve({ sessionId: "s1" })?.hooks?.modifiedFiles;
-	check("useModifiedFiles 读到 chat target 快照", hook?.getSnapshot() === FAKE_CHAT_SNAPSHOT);
-
-	// v0.4.3：run_code 内嵌工具调用的路径也要被提取（tools.write/edit/mkdir…）
-	{
-		const collect = loadMfsCollector();
-		const files = collect(FAKE_CHAT_SNAPSHOT.legacy?.nodes ?? [], FAKE_CHAT_SNAPSHOT.legacy?.runningCalls ?? []);
-		const paths = files.map((f) => f.path).sort();
-		check("run_code 内嵌 write/edit/mkdir 路径被提取",
-			["src/a.ts", "src/b.ts", "src/c.ts", "src/d.ts", "src/nested", "src/empty"].every((p) => paths.includes(p)),
-			paths.join(", "));
-	}
-
 	const setFace = faceAt(env.seats, "settings.section");
-	check("capability.alphaApi = true → 开关可用", setFace?.capability?.getSnapshot().alphaApi === true);
+	check("capability.alphaApi = true → 速度计开关可用", setFace?.capability?.getSnapshot().alphaApi === true);
 	check("全程无异常/告警日志", env.logs.error.length === 0 && env.logs.warn.length === 0, env.logs.error.concat(env.logs.warn).join(" | ") || "clean");
 
 	await env.entryFiber.dispose();
@@ -995,13 +976,17 @@ section("C. 服务后到：子 fiber 自动补挂（无需轮询）");
 
 	const lateFiber = env.ctx.plugin(function lateAlphaProvider(ctx) {
 		ctx.provide("uiConversation", { binding: () => ({ target: () => ({ getSnapshot: () => FAKE_CHAT_SNAPSHOT, subscribe: () => () => {} }) }) });
-		ctx.provide("uiSession", { provide: (def) => { env.ledger.provided.push(def); return () => {}; } });
 	}, {});
 	await lateFiber;
 	await tick(12);
 
 	check("服务出现后子 fiber 自动 = ACTIVE", fibersOf(env.ctx, "alphaFeatures")[0]?.state === FIBER.ACTIVE, stateOf(fibersOf(env.ctx, "alphaFeatures")[0]));
-	check("功能三选项卡被补挂", env.ledger.registered.includes("conversation.view/ui-tools-modified-files"), env.ledger.registered.join(", "));
+	check("补挂后功能六 pill 到位（子 fiber 函数体确实执行了）",
+		env.ledger.registered.includes("conversation.chat.assistant-actions/ui-tools-token-speed"),
+		env.ledger.registered.join(", "));
+	check("功能三已移除：补挂后也不出现 conversation.view",
+		!env.ledger.registered.some((row) => row.startsWith("conversation.view/")),
+		env.ledger.registered.join(", "));
 	check("补挂后 entry 仍 ACTIVE、审计仍 0 失败",
 		env.entryFiber.state === FIBER.ACTIVE
 		&& auditLoaderEntries([{ name: "dsh-ui-tools", fiber: env.entryFiber }]).length === 0);
@@ -1021,7 +1006,6 @@ section("D. 内核不提供 remote：功能一优雅缺席，不拖垮 entry（�
 
 	for (const [label, seat] of [
 		["功能二 折叠条", "sidebar.footer.action/ui-tools-workspace-collapse"],
-		["功能三 修改的文件", "conversation.view/ui-tools-modified-files"],
 		["功能四 工作区徽章", "conversation.session.header.actions/ui-tools-workspace-chip"],
 		["功能五 设置页", "settings.section/dsh-ui-tools"]
 	]) {
@@ -1041,5 +1025,5 @@ for (const row of results) {
 }
 const total = results.filter((row) => !row.section).length;
 console.log(`\n合计 ${total - failed}/${total} 通过（cordis：${located.kernel} → ${path.relative(process.cwd(), located.entry) || located.entry}）`);
-console.log("行为矩阵：新内核 6/6 功能；旧内核 4/6 功能 + 无横幅（功能三、六缺席属预期降级）");
+console.log("行为矩阵：新内核 5/5 功能；旧内核 4/5 功能 + 无横幅（功能五缺席属预期降级）");
 if (failed) process.exitCode = 1;
