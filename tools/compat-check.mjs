@@ -981,7 +981,7 @@ section("C. 服务后到：子 fiber 自动补挂（无需轮询）");
 	await tick(12);
 
 	check("服务出现后子 fiber 自动 = ACTIVE", fibersOf(env.ctx, "alphaFeatures")[0]?.state === FIBER.ACTIVE, stateOf(fibersOf(env.ctx, "alphaFeatures")[0]));
-	check("补挂后功能六 pill 到位（子 fiber 函数体确实执行了）",
+	check("补挂后功能五 速度计 pill 到位（子 fiber 函数体确实执行了）",
 		env.ledger.registered.includes("conversation.chat.assistant-actions/ui-tools-token-speed"),
 		env.ledger.registered.join(", "));
 	check("功能三已移除：补挂后也不出现 conversation.view",
