@@ -4,7 +4,8 @@
  *
  * 做什么：用**真实的 @deepseek-ai/cordis**（从本机已安装的 DSH 内核副本里取）
  * 搭一个最小宿主，把 `lib/client.js` 的 loader entry 挂进去，在三种内核场景下
- * 验证 docs/UI-TOOLS-KERNEL-ADAPT-DESIGN.md §4 的行为矩阵：
+ * 验证行为矩阵（该矩阵源自 DSH-Exoskeleton 仓库的设计文档
+ * docs/UI-TOOLS-KERNEL-ADAPT-DESIGN.md §4，**不在本仓库内**；本文件是它的可执行副本）：
  *
  *   0 声明层：入口 inject 只剩五个跨内核服务；bundle 只 require react
  *   A 旧内核（0.1.1-rc.x，不提供 uiConversation）
@@ -636,8 +637,8 @@ section("A. 旧内核（无 uiConversation）：静默降级");
 	for (const [label, seat] of [
 		["功能一 模型双按钮", "conversation.input.right/ui-tools-model-seat"],
 		["功能二 折叠条", "sidebar.footer.action/ui-tools-workspace-collapse"],
-		["功能四 工作区徽章", "conversation.session.header.actions/ui-tools-workspace-chip"],
-		["功能五 设置页", "settings.section/dsh-ui-tools"]
+		["功能三 工作区徽章", "conversation.session.header.actions/ui-tools-workspace-chip"],
+		["功能四 设置页", "settings.section/dsh-ui-tools"]
 	]) {
 		check(`旧内核保留 ${label}`, env.ledger.registered.includes(seat), seat);
 	}
@@ -1006,8 +1007,8 @@ section("D. 内核不提供 remote：功能一优雅缺席，不拖垮 entry（�
 
 	for (const [label, seat] of [
 		["功能二 折叠条", "sidebar.footer.action/ui-tools-workspace-collapse"],
-		["功能四 工作区徽章", "conversation.session.header.actions/ui-tools-workspace-chip"],
-		["功能五 设置页", "settings.section/dsh-ui-tools"]
+		["功能三 工作区徽章", "conversation.session.header.actions/ui-tools-workspace-chip"],
+		["功能四 设置页", "settings.section/dsh-ui-tools"]
 	]) {
 		check(`remote 缺席时仍保留 ${label}`, env.ledger.registered.includes(seat), seat);
 	}
