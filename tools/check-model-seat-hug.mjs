@@ -525,6 +525,74 @@ section("3. 原有回归钉未被动到");
 	else bad("官方模型按钮仍被 CSS 隐藏（display:none !important）");
 }
 
+/* ── 6. 主按钮背景透明（v0.4.11 用户要求） ──
+ *
+ * 需求原话是「把两个按钮的背景色指定为透明框」。它有两面，都必须钉住：
+ *   ① 常态**必须是** transparent —— 否则那层 8% 品牌色底又回来了，
+ *      症状是「改完刷新页面看不出来」（用户唯一能验收的方式就是肉眼看）；
+ *   ② 悬停/展开**必须仍有**反馈 —— 否则按钮变成「点了没反应」，
+ *      这是本仓库 §6 那类「改一处、静默坏另一处」的典型。
+ * 只读源码文本抓不到①的失败（写回 color-mix 照样是合法 CSS），
+ * 所以这里沿用它：**求值后的 CSS**，按 cascade 取到实际生效的那条声明。
+ */
+section("4. 主按钮背景（v0.4.11：常态透明，交互态保留反馈）");
+{
+	/**
+	 * 取元素实际生效的声明（按源码顺序，后者覆盖前者）。
+	 * 本文件的极简匹配器不实现伪类语义（`:hover` 等一律返回「不匹配」），
+	 * 所以这里天然只累计**常态**规则；交互态规则由下面单独筛。
+	 */
+	const declsFor = (el) => {
+		const out = {};
+		for (const r of rules) {
+			for (const s of r.selectors) {
+				if (el.matchesSelector(s)) Object.assign(out, r.decls);
+			}
+		}
+		return out;
+	};
+
+	const btn = new El("button", { "data-mss-btn": "" });
+
+	// ① 常态：背景必须就是 transparent（不是 color-mix 出来的半透明淡色）
+	const base = declsFor(btn);
+	if (base["background"] === "transparent") {
+		ok("主按钮常态背景 = transparent（用户要求的「透明框」）");
+	} else {
+		bad("主按钮常态背景 = transparent（用户要求的「透明框」）", `实得 ${JSON.stringify(base["background"])}`);
+	}
+	if (base["background-color"] === void 0) {
+		ok("主按钮未另设不透明的 background-color（不会盖掉 transparent）");
+	} else {
+		bad("主按钮未另设不透明的 background-color（不会盖掉 transparent）", `实得 ${JSON.stringify(base["background-color"])}`);
+	}
+
+	// ② 交互态：hover / 展开仍要有淡色反馈（半透明，不引入实心底）
+	const interactive = rules.filter((r) =>
+		r.selectors.some((s) => /^\[data-mss-btn\]:hover/.test(s)) ||
+		r.selectors.some((s) => /^\[data-mss-btn\]\[aria-expanded="true"\]$/.test(s))
+	);
+	const bgDecls = interactive.flatMap((r) => (r.decls["background"] === void 0 ? [] : [r.decls["background"]]));
+	if (bgDecls.length >= 2) ok("悬停态与展开态各自保留了背景反馈", bgDecls.join(" | "));
+	else bad("悬停态与展开态各自保留了背景反馈", `只找到 ${bgDecls.length} 条：${bgDecls.join(" | ")}`);
+	if (bgDecls.length > 0 && bgDecls.every((d) => /transparent/.test(d) && d !== "transparent")) {
+		ok("交互态反馈是半透明色（不是实心块，与透明框基调一致）");
+	} else {
+		bad("交互态反馈是半透明色（不是实心块，与透明框基调一致）", bgDecls.join(" | "));
+	}
+
+	// ③ 反向：面板内的下拉项不该被 [data-mss-btn] 的透明规则牵连
+	const row = new El("button", { "data-mss-row": "", class: "mss-row" });
+	let leaked = false;
+	for (const r of rules) {
+		for (const s of r.selectors) {
+			if (s.startsWith("[data-mss-btn]") && row.matchesSelector(s)) leaked = true;
+		}
+	}
+	if (!leaked) ok("透明背景规则未牵连面板内的下拉项（[data-mss-row] 不命中）");
+	else bad("透明背景规则未牵连面板内的下拉项（[data-mss-row] 不命中）");
+}
+
 console.log(`\n合计 ${pass}/${pass + fail} 通过`);
 if (fail > 0) {
 	console.log("失败项：");

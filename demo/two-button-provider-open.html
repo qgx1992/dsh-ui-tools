@@ -28,7 +28,7 @@
   [data-mss-btn] {
     position: relative; display: inline-flex; align-items: center; gap: 4px;
     height: 28px; padding: 0 9px; border: none; border-radius: 8px;
-    background: color-mix(in srgb, var(--mss-accent, #4176e6) 8%, transparent);
+    /* v0.4.11：两个主按钮（供应商 / 模型）的常态背景=完全透明 */ background: transparent;
     color: var(--mss-accent-text, #4176e6); font-size: 12px; font-weight: 500;
     line-height: 20px; cursor: pointer; white-space: nowrap; max-width: 200px;
     overflow: hidden; text-overflow: ellipsis;

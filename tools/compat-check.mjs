@@ -195,7 +195,7 @@ function loadClientBundle(logs) {
 const FAKE_CWD = "C:/ws/demo";
 /** 内核 remote.session 命名空间的替身；调用方没声明 remote 时 cordis tracker 会在取它之前抛错。 */
 const FAKE_REMOTE_SESSION = { selectModel: () => Promise.resolve() };
-/** 会话内容快照（chat target 的 legacy 形状）。功能三移除后，仍被功能六的
+/** 会话内容快照（chat target 的 legacy 形状）。功能三移除后，仍被功能五的
  *  chat 快照源（tspChatSource）断言使用；保留 tool-call 节点是为了让快照形状
  *  与真内核一致，避免假数据比真实更宽松。 */
 const FAKE_CHAT_SNAPSHOT = {
@@ -214,14 +214,14 @@ await tools.mkdir({ dirs: ["src/nested", "src/empty"] });` }) }
 };
 
 /**
- * 从 bundle 源码截取功能六取数段，直接测 tsp* 纯函数（不经 VDOM/hooks）。
+ * 从 bundle 源码截取功能五取数段，直接测 tsp* 纯函数（不经 VDOM/hooks）。
  * 与 loadClientBundle 同一份 BUNDLE 源码，保证测的就是被测 bundle。
  * @returns {{ tspFormatTps: Function, tspEstimateTokens: Function, tspChunkEffort: Function, tspTurnSpeed: Function }}
  */
 function loadTspSpeed() {
 	const src = fs.readFileSync(BUNDLE, "utf8");
-	const si = src.indexOf("/* ── 功能六取数段");
-	const ei = src.indexOf("/* ── 功能六取数段结束 ── */");
+	const si = src.indexOf("/* ── 功能五取数段");
+	const ei = src.indexOf("/* ── 功能五取数段结束 ── */");
 	if (si < 0 || ei < 0) throw new Error("TPS 取数段定位失败");
 	const depSrc = src.slice(si, ei);
 	// eslint-disable-next-line no-new-func
@@ -229,7 +229,7 @@ function loadTspSpeed() {
 }
 
 /**
- * 从 bundle 源码截取功能六的两个组件，用 reactStub 直接调用（不经真 DOM）。
+ * 从 bundle 源码截取功能五的两个组件，用 reactStub 直接调用（不经真 DOM）。
  * 组件的 DOM 结构与偏好开关门控都能在这里断言 —— 不必依赖真机截图。
  * @param hooks - 可选 hooks 覆写（例如把 useState 钉成固定时刻，测估算速度）。
  * @returns {{ TokenSpeedPill: Function, TokenSpeedLive: Function }}
@@ -237,8 +237,8 @@ function loadTspSpeed() {
 function loadTspComponents(hooks = {}) {
 	const src = fs.readFileSync(BUNDLE, "utf8");
 	// 纯函数段与组件段都要（组件调用 tspFormatTps / tspTurnSpeed）。
-	const pureStart = src.indexOf("/* ── 功能六取数段");
-	const pureEnd = src.indexOf("/* ── 功能六取数段结束 ── */");
+	const pureStart = src.indexOf("/* ── 功能五取数段");
+	const pureEnd = src.indexOf("/* ── 功能五取数段结束 ── */");
 	const compStart = src.indexOf("function TokenSpeedPill(props)");
 	const compEnd = src.indexOf("function tspLiveDefinition()");
 	if (pureStart < 0 || pureEnd < 0 || compStart < 0 || compEnd < 0) throw new Error("TPS 组件段定位失败");
@@ -259,9 +259,9 @@ function loadTspComponents(hooks = {}) {
 }
 
 /**
- * 载入本机**全部可发现**的真内核 ConversationNodeAssembler（功能六最关键的一环）。
+ * 载入本机**全部可发现**的真内核 ConversationNodeAssembler（功能五最关键的一环）。
  *
- * 为什么必须用真内核而不是假内核：本插件功能六走 Definition 通道，内核
+ * 为什么必须用真内核而不是假内核：本插件功能五走 Definition 通道，内核
  * buildTargetUpserts() 对「上一帧已物化、本帧返回 null」有硬校验并**抛错**，
  * 该异常会让整条 chat 视图快照链停更（真机症状：回合结束后界面不再刷新、
  * 后续提问不显示）。假内核没有实现这一校验，因此必须让真内核来判。
@@ -492,7 +492,7 @@ function makeKernel({ alpha, withholdRemote = false, ledger, seats }) {
 					: void 0)
 			}),
 			// 真内核的 UiConversation 同时提供 events（Definition 通道）与 views。
-			// 功能六的「生成中估算条」走 events.register；这里忠实复刻并记录，
+			// 功能五的「生成中估算条」走 events.register；这里忠实复刻并记录，
 			// 供断言直接驱动该 Definition 的状态机。
 			events: { register: (definition) => { ledger.definitions.push(definition); return () => {}; } }
 		};
@@ -688,16 +688,16 @@ section("B. 新内核（提供 uiConversation）：五个功能全部生效");
 	check("dispose 后 capability.alphaApi 回落 false", setFace?.capability?.getSnapshot().alphaApi === false);
 }
 
-/* ══════════════════════ 场景 B2：功能六 输出速度计（v0.4.6） ══════════════════════ */
+/* ══════════════════════ 场景 B2：功能五 输出速度计（v0.4.6） ══════════════════════ */
 
-section("B2. 功能六：输出速度计（精确 pill + 生成中估算 Definition）");
+section("B2. 功能五：输出速度计（精确 pill + 生成中估算 Definition）");
 {
 	const env = await mount({ alpha: true });
 
 	// ① 精确 pill：注册在 assistant-actions 槽，且 order 为负（排在官方「用时」pill 之前，
 	//    即动作条内紧邻其左侧）。数值口径必须与内核 deriveTurnMetrics 一致。
 	const pill = env.seats.get("conversation.chat.assistant-actions")?.find((row) => row.def.id === "ui-tools-token-speed");
-	check("功能六精确 pill 注册进 conversation.chat.assistant-actions", pill !== void 0,
+	check("功能五精确 pill 注册进 conversation.chat.assistant-actions", pill !== void 0,
 		env.ledger.registered.join(", "));
 	check("pill order 为负（渲染在官方「用时」左侧）", pill?.def.order === -10, String(pill?.def.order));
 
@@ -733,7 +733,7 @@ section("B2. 功能六：输出速度计（精确 pill + 生成中估算 Definit
 
 	// ② 生成中估算条：走 Definition 通道，必须真的注册、且状态机按契约演进。
 	const live = env.ledger.definitions.find((def) => def.kind === "token-speed-live");
-	check("功能六注册 token-speed-live Definition（生成中估算）", live !== void 0,
+	check("功能五注册 token-speed-live Definition（生成中估算）", live !== void 0,
 		env.ledger.definitions.map((def) => def.kind).join(", ") || "（无）");
 	check("Definition 声明 target=chat 且带 buildViewNode（内核 assertDefinitionTarget 要求两者成对）",
 		live?.target === "chat" && typeof live?.buildViewNode === "function");
@@ -876,7 +876,7 @@ section("B2. 功能六：输出速度计（精确 pill + 生成中估算 Definit
 }
 
 
-/* ══════════════════════ 场景 B3：功能六 × 真内核装配器（v0.4.7） ══════════════════════
+/* ══════════════════════ 场景 B3：功能五 × 真内核装配器（v0.4.7） ══════════════════════
  * 假内核测不到 Definition 的「撤回」硬校验，也测不到 transient→settleAssistant 的
  * 状态倒推路径 —— 而 v0.4.7 正是漏在这里（修完仍复现「后续提问不显示」）。
  * 本节把插件真实的 token-speed-live Definition 交给**每一个可发现的真内核**的
@@ -886,7 +886,7 @@ section("B2. 功能六：输出速度计（精确 pill + 生成中估算 Definit
  * 覆盖来源：$APPDATA/DSH-Exoskeleton/kernels/* 各副本 + app.asar 内桌面版自带内核。
  * **逐个内核各跑一遍**：任一版本失效都必须显式 FAIL，不能只测第一个。
  * ═══════════════════════════════════════════════════════════════════════════════════ */
-section("B3. 功能六 × 真内核 ConversationNodeAssembler（撤回校验 / transient 收尾，逐内核）");
+section("B3. 功能五 × 真内核 ConversationNodeAssembler（撤回校验 / transient 收尾，逐内核）");
 {
 	const kernels = loadKernelAssemblers();
 	if (kernels.length === 0) {
@@ -897,11 +897,11 @@ section("B3. 功能六 × 真内核 ConversationNodeAssembler（撤回校验 / t
 	for (const kernel of kernels) {
 		const KL = "[" + kernel.kernel + "] ";
 		const tspSrc = fs.readFileSync(BUNDLE, "utf8");
-		const pureStart = tspSrc.indexOf("/* ── 功能六取数段");
-		const pureEnd = tspSrc.indexOf("/* ── 功能六取数段结束 ── */");
+		const pureStart = tspSrc.indexOf("/* ── 功能五取数段");
+		const pureEnd = tspSrc.indexOf("/* ── 功能五取数段结束 ── */");
 		const defStart = tspSrc.indexOf("function tspLiveDefinition()");
 		const defEnd = tspSrc.indexOf("function tspChatSource(ctx, sessionId)");
-		if (pureStart < 0 || pureEnd < 0 || defStart < 0 || defEnd < 0) throw new Error("功能六源码段定位失败");
+		if (pureStart < 0 || pureEnd < 0 || defStart < 0 || defEnd < 0) throw new Error("功能五源码段定位失败");
 		const consts = tspSrc.slice(tspSrc.indexOf("const TSP_LIVE_KIND"), tspSrc.indexOf("const TSP_ZH = {"));
 		// eslint-disable-next-line no-new-func
 		const definition = new Function("console",

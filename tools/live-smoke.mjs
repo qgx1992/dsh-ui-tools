@@ -1,17 +1,22 @@
 #!/usr/bin/env node
 /**
- * dsh-ui-tools 真机无头冒烟（v0.4.2 验证用，不属于发布产物）
+ * dsh-ui-tools 真机无头冒烟（人工验收辅助，不属于发布产物）
  *
- * 用 puppeteer-core + 本机已装的 Playwright Chromium 打开正在运行的 DSH Web，
- * 断言 v0.4.2 在当前内核（0.1.2-alpha.3）下：
+ * 用 puppeteer-core + 本机已装的 Chromium 内核浏览器打开正在运行的 DSH Web，
+ * 断言当前版本（v0.4.11，五功能）在真实内核下：
  *   ① 没有 `Failed to load plugins` / `entry did not activate` 横幅；
  *   ② 插件确实激活（共享 style 标签在位 + 各功能 DOM 标记出现）；
- *   ③ 打开设置中心「DSH UI 工具」页并截图（人工复核视觉）；
- *   ④ 顺带渲染 demo/settings.html 的新旧内核两种状态，核对灰显样式。
+ *   ③ 功能一双按钮座位真的渲染、没有静默降级回官方控件；
+ *   ④ 打开设置中心「DSH UI 工具」页并截图（人工复核视觉）；
+ *   ⑤ 功能五速度计与内核 TPS 口径一致；
+ *   ⑥ 顺带渲染 demo/settings.html 的新旧内核两种状态，核对灰显样式。
  *
  * 用法：node tools/live-smoke.mjs <baseURL+token> [outDir]
  *   baseURL+token 形如 http://127.0.0.1:40112/?token=xxxx（可从 DSH 启动日志或桌面端拿到）
  * 拿不到 URL/token 时脚本会直接跳过（exit 0），不阻塞 npm run check。
+ *
+ * 口径提醒（v0.4.9 后）：功能三「修改的文件」已整体移除，故本文件不再断言
+ * 该选项卡与 `[data-mfs-root]`；设置页偏好行也由四行变为**三行**。
  */
 
 import fs from "node:fs";
@@ -22,12 +27,12 @@ import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
-const TARGET = process.argv[2];
+const TARGET = process.argv[2] || process.env.DSH_SMOKE_URL || "";
 const OUT = path.resolve(process.argv[3] || path.join(process.env.TEMP || "/tmp", "dsh-ui-tools-smoke"));
 fs.mkdirSync(OUT, { recursive: true });
 
 if (!TARGET) {
-	console.log("SKIP 未提供 DSH Web URL+token（node tools/live-smoke.mjs http://127.0.0.1:PORT/?token=...）");
+	console.log("SKIP 未提供 DSH Web URL+token（node tools/live-smoke.mjs http://127.0.0.1:PORT/?token=... 或设 DSH_SMOKE_URL）");
 	process.exit(0);
 }
 
@@ -92,8 +97,7 @@ const MARKERS = {
 	collapseBar: "[data-wc-collapse-bar]",
 	chip: "[data-wsc-chip]",
 	settingsRoot: "[data-set-root]",
-	modifiedFiles: "[data-mfs-root]",
-	// v0.4.6 功能六：精确速度 pill（回合结束后，紧邻「用时」）与生成中估算条。
+	// v0.4.6 功能五：精确速度 pill（回合结束后，紧邻「用时」）与生成中估算条。
 	tokenSpeedPill: "[data-tsp-pill]",
 	tokenSpeedLive: "[data-tsp-live]"
 };
@@ -133,7 +137,7 @@ try {
 	check("无 entry did not activate 文案", !/did not activate/i.test(bannerText));
 	check("插件共享 style 标签在位（entry 已激活并注册）",
 		await page.evaluate((sel) => !!document.querySelector(sel), MARKERS.styleTag));
-	check("无 dsh-ui-tools 相关 pageerror", pageErrors.filter((row) => /ui-tools|mfs|alphaFeatures/.test(row)).length === 0,
+	check("无 dsh-ui-tools 相关 pageerror", pageErrors.filter((row) => /ui-tools|alphaFeatures/.test(row)).length === 0,
 		pageErrors.slice(0, 3).join(" | ") || "clean");
 	// v0.4.4 回归：功能一冷调 directoryFor 时若漏声明 remote / remote.session，内核会在每次
 	// 挂载会话时抛「cannot get property "remote.session" without inject」。假内核复刻不了
@@ -187,34 +191,28 @@ try {
 		}, MARKERS.settingsRoot);
 		check("设置页渲染出 [data-set-root]", !!set);
 		if (set) {
-			check("四个偏好行都在", set.rows.length === 4, set.rows.map((row) => row.label).join(" / "));
-			const mfsRow = set.rows.find((row) => row.label.includes("修改的文件"));
-			check("当前内核（alpha.3）下功能三开关不灰显", mfsRow && mfsRow.disabled === false, JSON.stringify(mfsRow ?? null));
+			// v0.4.9 移除「修改的文件」开关后，偏好行由四行变为三行：
+			// 工作区徽章 / 启动默认折叠 / 输出速度计。
+			check("三个偏好行都在", set.rows.length === 3, set.rows.map((row) => row.label).join(" / "));
+			const chipRow = set.rows.find((row) => row.label.includes("工作区徽章"));
+			check("功能三开关（工作区徽章）在设置页", !!chipRow, JSON.stringify(chipRow ?? null));
 			const tspRow = set.rows.find((row) => row.label.includes("输出速度计"));
-			check("功能六开关在设置页且不灰显（v0.4.6）", tspRow && tspRow.disabled === false, JSON.stringify(tspRow ?? null));
+			check("功能五开关（输出速度计）在设置页且不灰显（v0.4.6）", tspRow && tspRow.disabled === false, JSON.stringify(tspRow ?? null));
 		}
 		await page.screenshot({ path: path.join(OUT, "02-settings-page.png") });
 	}
 	check("无插件相关 console error", consoleErrors.filter((row) => /ui-tools/.test(row)).length === 0,
 		consoleErrors.slice(0, 3).join(" | ") || "clean");
 
-	console.log("\n2b. 功能三在真机上的取数（需要一个有改动记录的历史会话）");
+	console.log("\n2b. 进入一条历史会话（为 2c 的速度计取数准备素材）");
 	await page.keyboard.press("Escape");
 	await new Promise((r) => setTimeout(r, 1200));
 
-	const findTab = () => page.evaluate(() => {
-		const rows = [...document.querySelectorAll("button, [role=tab], [role=button], span, div")]
-			.filter((el) => (el.textContent || "").trim() === "修改的文件");
-		if (!rows.length) return false;
-		const deepest = rows.reduce((best, el) => (best.textContent.length <= el.textContent.length ? best : el), rows[0]);
-		(deepest.closest("button, [role=tab], [role=button]") ?? deepest).click();
-		return true;
-	});
-
-		let tabFound = await findTab();
-	if (!tabFound) {
-		// 冷启动落在空白新会话（没有 view tab 栏）：用功能二自己的「展开全部」
-		// 打开工作区分组，再点进第一条历史会话。
+	// v0.4.9 起不再有「修改的文件」选项卡可点，这里改为：先看当前是否已停在
+	// 有回合内容的会话；否则用功能二自己的「展开全部」打开工作区分组，
+	// 再点进第一条历史会话。这一步**不是**断言主体，只是为 2c 造前置条件。
+	const hasTurns = await page.evaluate(() => document.querySelectorAll("[data-tsp-pill], [data-turn-time-details]").length > 0);
+	if (!hasTurns) {
 		const expanded = await page.evaluate(() => {
 			const bar = document.querySelector("[data-wc-collapse-bar]");
 			if (!bar) return "no-bar";
@@ -228,6 +226,7 @@ try {
 			// 可靠路径：找到会话行的「操作」按钮（aria-label=会话"..."的操作），
 			// 向上取该行容器并点击 → 打开该会话（diag 实测有效）。
 			const slot = document.querySelector('[data-slot="sidebar.workspaces"]');
+			if (!slot) return "no-slot";
 			const op = [...slot.querySelectorAll("[aria-label]")].find((el) => /会话.*操作/.test(el.getAttribute("aria-label") || ""));
 			if (!op) return "no-op-btn";
 			let row = op.parentElement;
@@ -241,27 +240,12 @@ try {
 			return (row.textContent || "").trim().slice(0, 26);
 		});
 		await new Promise((r) => setTimeout(r, 3500));
-		tabFound = await findTab();
 		check("（前置）展开侧边栏分组并进入历史会话", true, `expand=${expanded} session=${clickedSession}`);
-	}
-	check("会话头部出现「修改的文件」选项卡（子 fiber 已激活）", tabFound);
-	if (tabFound) {
-		await new Promise((r) => setTimeout(r, 2500));
-		const mfs = await page.evaluate((sel) => {
-			const root = document.querySelector(sel);
-			if (!root) return null;
-			return {
-				files: root.querySelectorAll(".mfs-item").length,
-				title: root.querySelector(".mfs-title")?.textContent?.trim() ?? "",
-				count: root.querySelector(".mfs-count")?.textContent?.trim() ?? "",
-				first: root.querySelector(".mfs-file")?.textContent?.trim().slice(0, 60) ?? ""
-			};
-		}, MARKERS.modifiedFiles);
-		check("视图渲染 [data-mfs-root] 并从 chat target 提取到文件", !!mfs, JSON.stringify(mfs ?? null));
-		await page.screenshot({ path: path.join(OUT, "05-modified-files-tab.png") });
+	} else {
+		check("（前置）当前会话已有回合内容，无需切换", true, "already on a session with turns");
 	}
 
-	console.log("\n2c. 功能六：回合结束后的精确速度 pill（真机取数）");
+	console.log("\n2c. 功能五：回合结束后的精确速度 pill（真机取数）");
 	{
 		// 回到「对话」视图：pill 挂在 assistant-actions 动作条上，只在 chat 视图里渲染。
 		const backToChat = await page.evaluate(() => {
@@ -300,7 +284,7 @@ try {
 			check("（跳过）当前会话无「用时」pill，无法对照内核 TPS 口径", true, "no turn-time pill");
 		} else {
 			console.log(`     内核「用时」弹窗：${JSON.stringify(kernelHasTps)}`);
-			check("功能六 pill 与内核 TPS 口径一致（内核有则必须有，内核无则必须无）",
+			check("功能五 pill 与内核 TPS 口径一致（内核有则必须有，内核无则必须无）",
 				kernelHasTps.hasTps ? pills.length > 0 : pills.length === 0,
 				`kernelHasTps=${kernelHasTps.hasTps} pills=${pills.length}`);
 			check("（跳过，信息）本回合是否可算 TPS", true, kernelHasTps.hasTps ? "可算（pill 应在场）" : "不可算（历史回合缺 firstTokenTime，内核同样不显示）");
@@ -349,17 +333,22 @@ try {
 		}, alpha);
 		await new Promise((r) => setTimeout(r, 300));
 		const st = await dp.evaluate(() => {
-			const row = document.getElementById("row-mfs");
+			// 真实设置页当前是**三行**（工作区徽章 / 启动默认折叠 / 输出速度计）。
+			// 其中只有「输出速度计」一行受 capability.alphaApi 门控（demo 里 id=row-alpha），
+			// 它是灰显两态的唯一观察点。
+			const row = document.getElementById("row-alpha");
 			return {
+				rows: document.querySelectorAll("[data-set-row]").length,
 				disabled: row.dataset.setDisabled,
-				toggleDisabled: document.getElementById("mfs-toggle").disabled,
-				hintVisible: !document.getElementById("mfs-hint").hidden,
+				toggleDisabled: document.getElementById("alpha-toggle").disabled,
+				hintVisible: !document.getElementById("alpha-hint").hidden,
 				note: document.getElementById("k-note").textContent.trim()
 			};
 		});
 		check(`${name}: ${alpha ? "新内核" : "旧内核"} 灰显状态正确`,
 			alpha ? (st.disabled === "false" && !st.toggleDisabled && !st.hintVisible) : (st.disabled === "true" && st.toggleDisabled && st.hintVisible),
 			JSON.stringify(st));
+		check(`${name}: demo 设置页为三行（与 v0.4.9 起的真实设置页一致）`, st.rows === 3, `rows=${st.rows}`);
 		await dp.screenshot({ path: path.join(OUT, `${name}.png`) });
 		await dp.close();
 	}
