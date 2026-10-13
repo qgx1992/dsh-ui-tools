@@ -577,7 +577,9 @@ check("bundle 只 require react（client 模块表铁律）",
 		// npm 上**全部 29 个**已发布内核版本（@deepseek-ai/dsh）+ 3 个「未来」哨兵。
 		// 逐项硬编码期望值，而不是按区间反推——否则断言退化成同义反复。
 		//
-		// ⚠ v0.4.8：此前只列了 21 个，**漏掉 0.1.6-alpha.2 / 0.1.5-rc.3以及整条 0.1.7/0.2.0 线**
+		// ⚠ v0.4.8 修正：旧版本此处只列了 21 个内核，漏掉 0.1.6-alpha.2 / 0.1.5-rc.3（二者现已
+		// 在列表内）以及整条 0.1.7 / 0.2.0 线——导致「双语义一致」类断言在那些版本上从未真正跑过。
+		// 当前为全量 29 个已发布版本 + 3 个未来哨兵，逐项硬编码期望值（不再靠范围推导）。
 		// （0.1.7-alpha.1 / 0.1.7-alpha.2 / 0.1.7-rc.1 / 0.1.7-rc.2 / 0.2.0-rc.1 / 0.2.0-rc.2）。
 		// 漏项让「两种 semver 语义判决一致」这条断言**假绿**：旧区间 `>=0.1.6-0` 在普通语义下
 		// 不覆盖任何 0.1.7-*/0.2.0-* 预发布版（只在 includePrerelease 下才 true），恰是 6 条分流。
@@ -681,6 +683,32 @@ section("B. 新内核（提供 uiConversation）：五个功能全部生效");
 
 	const setFace = faceAt(env.seats, "settings.section");
 	check("capability.alphaApi = true → 速度计开关可用", setFace?.capability?.getSnapshot().alphaApi === true);
+
+	// v0.4.12：样式注入必须「只有一份共享标签，且五份 CSS 全在里面」。
+	// 历史缺陷：共享标签漏拼 WC_CSS，功能二又自建了一个只装 WC_CSS 的
+	// <style id="dsh-ui-tools-wc-collapse-style">，等于同一份规则注入两次、
+	// 且两个标签由不同 effect 各自拆卸（卸载中间帧会闪断折叠条样式）。
+	{
+		const styleTags = env.logs.appended.filter((node) => node && node.tag === "style");
+		check("样式标签有且仅有一个（无第二份重复注入）",
+			styleTags.length === 1, `appendChild 的 <style> 数 = ${styleTags.length}`);
+		const css = styleTags[0]?.textContent ?? "";
+		// 五份 CSS 各自的哨兵选择器，必须都出现在共享标签里
+		const sentinels = [
+			["功能一 MSS_CSS", "[data-mss-seat]"],
+			["功能二 WC_CSS", ".wc-collapse-bar"],
+			["功能三 WSC_CSS", "[data-wsc-chip]"],
+			["功能四 SET_CSS", "[data-set-root]"],
+			["功能五 TSP_CSS", "[data-tsp-pill]"]
+		];
+		const missing = sentinels.filter(([, needle]) => !css.includes(needle)).map(([label]) => label);
+		check("共享样式标签含全部五份 CSS 哨兵（WC_CSS 不再漏拼）",
+			missing.length === 0, missing.length === 0 ? "五份齐全" : `缺失：${missing.join("、")}`);
+		check("不再存在功能二的独立 style 标签（id 已废弃）",
+			!styleTags.some((node) => node.id === "dsh-ui-tools-wc-collapse-style"),
+			styleTags.map((node) => `id=${String(node.id)}`).join(", ") || "（无 id）");
+	}
+
 	check("全程无异常/告警日志", env.logs.error.length === 0 && env.logs.warn.length === 0, env.logs.error.concat(env.logs.warn).join(" | ") || "clean");
 
 	await env.entryFiber.dispose();

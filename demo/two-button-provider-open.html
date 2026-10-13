@@ -21,15 +21,19 @@
   h1 { font-size: 16px; margin: 0 0 4px; }
   .sub { font-size: 12px; color: var(--dsw-alias-label-secondary); margin-bottom: 24px; }
   .card { background: #fff; border: 1px solid var(--dsw-alias-border-l2); border-radius: 12px; padding: 16px; max-width: 560px; }
-  .composer { border: 1px solid var(--dsw-alias-border-l3); border-radius: 12px; background: #fff; padding: 12px 12px 8px; min-height: 130px; }
-  .placeholder { color: var(--dsw-alias-label-tertiary); font-size: 13px; }
+  /* v0.4.12：实机 composer 是深色底（两个主按钮的常态文字已按用户要求改为纯白），
+     这里把预览用的输入框也做成深色，否则白字在这张预览页上会看不见。 */
+  .composer { border: 1px solid rgba(255,255,255,.14); border-radius: 12px; background: #17181c; padding: 12px 12px 8px; min-height: 130px; }
+  .placeholder { color: #8b9099; font-size: 13px; }
   .footer { display: flex; justify-content: flex-end; align-items: center; padding-top: 10px; gap: 6px; }
   [data-mss-seat] { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
   [data-mss-btn] {
     position: relative; display: inline-flex; align-items: center; gap: 4px;
     height: 28px; padding: 0 9px; border: none; border-radius: 8px;
-    /* v0.4.11：两个主按钮（供应商 / 模型）的常态背景=完全透明 */ background: transparent;
-    color: var(--mss-accent-text, #4176e6); font-size: 12px; font-weight: 500;
+    /* v0.4.11：两个主按钮（供应商 / 模型）的常态背景=完全透明 */
+    /* v0.4.12：常态文字色=纯白（实机 composer 为深色底，白字对比最高） */
+    background: transparent;
+    color: #fff; font-size: 12px; font-weight: 500;
     line-height: 20px; cursor: pointer; white-space: nowrap; max-width: 200px;
     overflow: hidden; text-overflow: ellipsis;
     transition: background .16s cubic-bezier(.4,0,.2,1), box-shadow .16s cubic-bezier(.4,0,.2,1);

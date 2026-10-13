@@ -1,6 +1,6 @@
 # dsh-ui-tools
 
-DSH Web 插件：五个 UI 工具合并成一个包，只动对应控件，不改 DSH 任何一行源码。
+DSH Web 插件：六个 UI 工具合并成一个包，只动对应控件，不改 DSH 任何一行源码。
 
 ## 功能一：模型选择双按钮（原 dsh-model-select-style）
 
@@ -60,6 +60,53 @@ DSH Web 插件：五个 UI 工具合并成一个包，只动对应控件，不�
 
 > **历史回合为什么可能没有读数**：`firstTokenTime` 来自流式增量（瞬态事件，不进持久化日志），因此**重新加载页面后看到的历史回合**通常缺该字段——此时精确值不可得，插件与内核「用时」弹窗**都不显示 TPS**（同一口径、同一结论）。在本回合刚跑完、未重载页面的情况下读数正常。
 
+## 功能六：会话 / 工作区列表右键菜单（v0.4.13 新增）
+
+在侧边栏的**会话行**与**工作区行**上按右键，弹出上下文操作菜单。实现参考社区插件 [`@baihejiangnan/dsh-session-context-menu`](https://www.npmjs.com/package/@baihejiangnan/dsh-session-context-menu) 的能力面，但**代码完全自写**——不 `import`、不 `require`、不引用对方的包名与全局注册表，也不依赖对方的事件名（已由断言钉死）。
+
+**会话行右键**（6 项）：
+
+| 菜单项 | 行为 |
+| --- | --- |
+| 重命名 | 走官方重命名入口（点开官方行内编辑，不自造提交逻辑） |
+| 归档会话 | `workspaces.archiveSession(id)` |
+| 创建会话分支 | `sessions.fork({ sessionId, increaseTitle: true })` |
+| 复制会话 ID | 写剪贴板 |
+| 复制工作目录 | 写 `session.cwd` |
+| 刷新页面 | `location.reload()` |
+
+**工作区行右键**（4 项）：新建会话（`workspaces.startSession(id)`）、复制工作区路径、归档工作区全部会话（逐个 `archiveSession`）、刷新页面。
+
+**选中文本时右键**（2 项）：复制所选文本、发送所选文本到输入框（填入输入框，不自动发送）。
+
+### 目标识别：为什么不能用 `aria-label`
+
+判据是官方渲染时**写死**的 `data-row-key` 前缀 —— `session:<id>` / `workspace:<id>`，**不看 `aria-label`、不看界面语言**。这一条来自参考插件注释里指出的坑：官方 `row-actions` 按钮在**空白会话**与**已归档会话**上根本不渲染，若靠「这一行有没有『会话操作』按钮」判定，这类行会被判成非会话行，菜单直接退化、拿不到 session。（同一结论、自写实现。）
+
+### 解析：三级降级 + 唯一性保护
+
+`ctxResolveSession(sessions, row, workspace)` 依次尝试：
+
+1. **DOM 行 id** —— `data-row-key` 命中，最可靠；
+2. **当前选中行** —— `aria-selected="true"` 时取 store 的 `current`；
+3. **标题兜底** —— 按 `aria-label` / `title` 在库中匹配，**只在唯一命中时采用**。
+
+**任一级无法唯一确定就返回 `null`，调用方据此保留浏览器原生菜单 —— 绝不猜。** 尤其第 3 级：标题命中多个会话时同样返回 `null`，宁可不管，也不操作错会话。
+
+### 实现原理（纯 DOM，不注册 slot）
+
+- 只挂 **document 级** 三个监听：`contextmenu`、`pointerdown`、`keydown`；菜单节点 `appendChild` 到 `body`；
+- **不注册任何 slot**，因此旧内核上也照常可用（无 alpha 依赖，不进 `alphaFeatures` 子 fiber）；用到的 `sessions` / `workspaces` 本就在入口 `inject` 里，不新增声明（守 R3）；
+- **R2 合规**：不搬动、不包裹 slot 渲染出来的任何节点，**无 `MutationObserver`、无轮询定时器** —— 菜单节点是本插件新建的，不是搬运既有节点；
+- 全部监听由 `installContextMenu()` 返回的拆卸函数解除，**插件卸载后不留补丁**（断言逐项核对 `contextmenu` / `pointerdown` / `keydown` 三类监听是否解绑干净）；
+- 动作抛错被捕获并转成提示，**不冒泡成未捕获异常**；事件已被 `preventDefault()` 时不再接管，与其他右键类插件共存不打架。
+
+### 交互与无障碍
+
+`role="menu"` / `role="menuitem"`、`tabindex="-1"` + roving tabindex（打开即聚焦首项）；支持 <kbd>Esc</kbd> 关闭、<kbd>↑</kbd>/<kbd>↓</kbd> 移动、<kbd>Home</kbd>/<kbd>End</kbd> 跳转、点击菜单外部关闭；归档等危险项走独立样式类 `dsh-ctx-item--danger`；**空菜单被拒绝**，不会弹出一个空白方块。
+
+**开关**：设置页「会话 / 工作区列表右键菜单」，默认开；偏好字段 `ctxMenuEnabled`。**关掉时一根监听都不挂**，浏览器原生右键菜单原样保留；门控显式订阅偏好仓库，因此**改开关即时生效、无需刷新页面**，卸载时订阅与监听一并清理。
+
 ## 实现原理
 
 - 官方模型组件照常注册在 `conversation.input.model`（数据/提交逻辑原样保留），用 CSS 隐藏官方触发按钮；
@@ -71,7 +118,7 @@ DSH Web 插件：五个 UI 工具合并成一个包，只动对应控件，不�
 - 工作区徽章注册进 `conversation.session.header.actions`（见功能三）。
 - 设置页注册进 `settings.section`（见功能四）；所有偏好走 apply 期创建的一次性 localStorage 偏好仓库，组件经 `useSyncExternalStore` 订阅。
 
-五个功能各自独立命名空间（locale / slot id / data-* 前缀），互不干扰。
+六个功能各自独立命名空间（locale / slot id / data-* 前缀），互不干扰。
 
 > **v0.4.9 移除「修改的文件」选项卡**：它原本注册进官方 `conversation.view` 槽（v0.2.0 引入、v0.4.9 整体删除）。移除原因：其取数是同一份 chat target 快照的又一遍解析，与速度计重复；维护成本集中在 `run_code` 内嵌路径提取这类易碎逻辑上（模板串、变量拼接、shell 级写操作都解析不了）。随之下线的还有 `uiSession.provide` 暴露的 `useModifiedFiles` hook、`workspaces.openPath` 打开链路、`mfsCompact` 偏好与 `conversation.view` 槽注册——`alphaFeatures` 子 fiber 的 `inject` 因此收窄为 `["uiConversation"]`，跨内核降级机制本身完全未变。
 
@@ -100,17 +147,28 @@ DSH Web 插件：五个 UI 工具合并成一个包，只动对应控件，不�
 - 该区间已对 npm 上全部 **29 个**已发布内核版本 + 3 个未来哨兵逐项断言，并保证普通 semver 语义与市场侧 `includePrerelease` 语义**判决一致**（见下「自检」）。
 - **v0.4.8 修正**：此前区间写作 `… || >=0.1.6-0`，其末项在**普通语义**下**不覆盖**任何 `0.1.7-*` / `0.2.0-*` 预发布版（只在 `includePrerelease` 下才成立），实测有 **6 条分流**（`0.1.7-alpha.1/2`、`0.1.7-rc.1/2`、`0.2.0-rc.1/2`）。原因同上一节：预发布版只与同 `x.y.z` 的元组比较，而 `>=0.1.6-0` 的下界落在 0.1.6 线。更隐蔽的是——当时 0b 的版本表**只列了 21 个**，恰好漏掉整条 0.1.7/0.2.0 线，于是「两种语义判决一致」那条断言**假绿**。现改为逐条发布线 `^0.1.6-0 || ^0.1.7-0 || ^0.2.0-0 || >=0.3.0-0` 并**全量列表**，令同类裂缝无处可藏。
 
-> **验证口径**：`node tools/compat-check.mjs` 跑在本机已装内核副本的**真实 cordis** 上（当前实测 `0.2.1-alpha.2`，**98/98** 全绿；断言计数随内核枚举动态变化，门槛是**零 FAIL** 而非某个具体数字，因此别把它当固定指标读），且场景 B3 会**逐内核遍历**本机全部可发现内核（`kernels/*` 各副本 + **`app.asar` 内桌面版自带内核**），断言五个功能的槽位注册、子 fiber 状态与 boot 审计口径；`0.1.7-rc.2` / `0.1.5-rc.2` / `0.1.2-alpha.3` 为历史验证点（这些内核副本**已不在本机**，本机现存副本为 `0.2.1-alpha.1` 与 `0.2.1-alpha.2`，B3 会跳过缺席者）。真机（浏览器）行为另由 `tools/live-smoke.mjs` 覆盖，需自备 URL+token（`0.2.1-alpha.2` 已实测：入口无横幅、五功能标记在位、设置页三行开关均正常）。
+> **验证口径**：`node tools/compat-check.mjs` 跑在本机已装内核副本的**真实 cordis** 上（当前实测 `0.2.1-alpha.2`，**101/101** 全绿；断言计数随内核枚举动态变化，门槛是**零 FAIL** 而非某个具体数字，因此别把它当固定指标读），且场景 B3 会**逐内核遍历**本机全部可发现内核（`kernels/*` 各副本 + **`app.asar` 内桌面版自带内核**），断言五个功能的槽位注册、子 fiber 状态与 boot 审计口径；`0.1.7-rc.2` / `0.1.5-rc.2` / `0.1.2-alpha.3` 为历史验证点（这些内核副本**已不在本机**，本机现存副本为 `0.2.1-alpha.1` 与 `0.2.1-alpha.2`，B3 会跳过缺席者）。真机（浏览器）行为另由 `tools/live-smoke.mjs` 覆盖，需自备 URL+token（`0.2.1-alpha.2` 已实测：入口无横幅、五功能标记在位、设置页三行开关均正常）。
+
+> **profile 安装漂移**：`tools/check-profile-drift.mjs` 会比对 `~/.dsh/profiles/*/` 三处口径——`package.json` 的声明、`pnpm-lock.yaml` 的 specifier 与 resolved 版本、`node_modules` 里实际安装的版本。三者不一致时必须先修 profile，否则「改了代码、刷新页面、毫无变化」——因为真实 GUI 跑的是 profile 里的安装副本，而 `compat-check.mjs` 读的**永远是仓库 `lib/client.js`**，两者是两份文件。
 
 ## 自检
 
 ```bash
 node --check lib/client.js       # 语法
+node tools/check-hooks-order.mjs  # Hook 顺序钉：条件 return 不得夹在 Hook 之间（防 React 卸载期抛错）
 node tools/check-model-seat-hug.mjs  # 功能一「座位紧贴听写按钮」的选择器回归钉（手写 DOM 骨架 + 求值真实 CSS）
+node tools/check-context-menu.mjs    # 功能六右键菜单钉：判据/三级降级/菜单组装/事件分发/键盘/拆卸/开关门控（手写 DOM 测试台）
+node tools/check-profile-drift.mjs   # profile 安装漂移钉：声明 / lock / 实装三者须一致
 node tools/compat-check.mjs      # 内核自适应回归（真实 cordis，场景 0/0b/A/B/B2/B3/C/D + 速度计组件/口径断言）
 node tools/live-smoke.mjs <URL+token>   # 真机冒烟（可选；自动探测本机 Chrome/Edge）
 # 或一次跑完：npm run check
 ```
+
+`tools/check-hooks-order.mjs` 专治一类**只在特定状态切换时才炸**的崩溃：React 靠「Hook 调用顺序 + 数组下标」识别 Hook，而它**从不清空 hook 数组**，只按 `hookIndex++` 覆盖——于是 `if (!cond) return null;` 夹在两个 Hook 之间时，`cond` 为假的那次渲染里后续 Hook 槽位残留上一次的值（若上次该槽是 `undefined`，卸载时 React 执行 `destroy()` 直接抛 `undefined is not a function`）。脚本用纯词法扫描（不引入 babel/typescript，守 R6）切出每个函数组件的函数体、跟踪最外层 `return` 与 `useXxx(` 调用的相对位置，命中即 FAIL；并自带双向负向对照（违规样例必红 + 合规写法不误报），确保断言本身不会退化成同义反复。
+
+`tools/check-context-menu.mjs` 用**手写 DOM 测试台**（零依赖，不引 jsdom）跑功能六的 82 条断言：从 `lib/client.js` 里按花括号配平**取出真实函数**注入沙箱执行，并把 `CTX_ZH` 词典求值出来做文案核对（断言看的是用户真正会看到的字，不是 stub 返回的键名）。覆盖判据识别（含「工作区行不被误判成会话行」）、三级降级与**标题歧义必须返回 null**、菜单组装与空菜单拒绝、三类目标的右键分发、键盘与外部点击、卸载后三类监听全部解绑且补丁摘干净、**动作真的调到官方服务而非空壳**、动作抛错不冒泡、不引用参考插件包名、CSS 并入共享标签、开关门控语义。**负向对照必须真的变红**：判据改坏的方式是把源码文本改掉后重新编译沙箱（给 `env.ctxSessionRowId` 重新赋值是**无效**的——闭包内的调用走词法绑定，改不到；这一点本身就是踩过的坑）。另外，凡是「代码里不许出现 X」的断言都先**剥离注释**再比对，否则文件顶部写明「参考插件：@baihejiangnan/…」「无 MutationObserver」会把注释当代码判红。
+
+`tools/check-profile-drift.mjs` 专治一类**排查成本极高的假象**：profile 的 `package.json` 写着 `#v0.4.11`，而 `pnpm-lock.yaml` 仍钉在旧 commit——下次 `pnpm install` 会把插件**无声回退**；更常见的是「改了仓库代码、刷新页面毫无变化」，因为真实 GUI 加载的是 profile 里的安装副本。脚本只读不写，逐 profile 比对声明 / lock specifier / lock resolved 版本 / `node_modules` 实装版本，找不到 `~/.dsh/profiles` 时优雅 SKIP。
 
 `tools/check-model-seat-hug.mjs` 专治一类**静态阅读看不出来**的样式 bug：它把手写 DOM 骨架建成内核 `InputBar` 右侧动作区的真实层次（座位在 `div.standardControls` 内、听写按钮嵌在兄弟容器 `div.activity` 的 `span.triggerAnchor` 里），**求值** `MSS_CSS` 模板串（而不是只读源码文本）后用自写选择器匹配器逐条核对：座位父容器被推到最右、横缝收到 0、中英两套 `aria-label` 都命中、无座位/听写缺席时不误伤、CSS 里不出现内核哈希类名、官方模型按钮仍被隐藏。它也守住「模板串被反引号提前闭合」这类事故——那种情况下求值会失败或留下未展开的 `${...}`。本仓库零依赖，不引入 jsdom。
 
@@ -122,7 +180,29 @@ node tools/live-smoke.mjs <URL+token>   # 真机冒烟（可选；自动探测�
 
 ## 变更记录
 
-- **v0.4.11（本次）**：**把功能一（模型双按钮）里两个主按钮的背景色显式指定为透明**，并做一次全仓库口径扫尾。
+- **v0.4.13（本次）**：新增**功能六「会话 / 工作区列表右键菜单」**——插件由五功能变为六功能。
+  - **来源**：用户要求「加个右键功能」，参考社区插件 `@baihejiangnan/dsh-session-context-menu`。**只借鉴能力面与那条 `data-row-key` 判据经验，代码完全自写**：不 `import` / 不 `require` / 不引用对方包名与全局注册表（`dsh.session-context-menu.extensions`）、不依赖对方自定义事件（`dsh:session-context-menu`）——四条都由断言钉死，防止以后手滑把参考插件变成硬依赖。
+  - **菜单内容**：会话行 6 项（重命名 / 归档会话 / 创建会话分支 / 复制会话 ID / 复制工作目录 / 刷新页面）；工作区行 4 项（新建会话 / 复制工作区路径 / 归档工作区全部会话 / 刷新页面）；选中文本时 2 项（复制所选文本 / 发送所选文本到输入框）。
+  - **判据不依赖界面语言**：用官方写死的 `data-row-key` 前缀（`session:` / `workspace:`）识别目标，而不是「这一行有没有『会话操作』按钮」或 `aria-label` —— 官方 `row-actions` 在**空白会话 / 已归档会话**上不渲染，靠按钮存在性判定会把这类行判成非会话行（该坑由参考插件注释指出，此处按同一结论自写实现）。
+  - **绝不猜**：解析三级降级（DOM 行 id → `aria-selected`→`current` → 标题唯一命中），**任何一级无法唯一确定就返回 `null` 并保留浏览器原生菜单**；标题命中多个会话时同样拒绝——宁可不管，也不操作错会话。
+  - **纯 DOM，守 R2/R3**：只挂 document 级 `contextmenu` / `pointerdown` / `keydown` 三个监听，菜单 `appendChild` 到 `body`，**不注册任何 slot、不搬动也不包裹 slot 节点、无 `MutationObserver`、无轮询定时器**；用到的 `sessions` / `workspaces` 本就在入口 `inject` 内，**不新增声明**。因此旧内核上照常可用（无 alpha 依赖，不进 `alphaFeatures` 子 fiber）。卸载时三类监听全部解绑，不留补丁。
+  - **健壮性**：动作抛错被捕获并转成用户可见提示（不冒泡成未捕获异常）；已 `preventDefault()` 的事件不再接管（与其他右键插件共存）；空菜单被拒绝（不弹空白方块）；危险项独立样式类。无障碍：`role=menu`/`menuitem`、roving tabindex、<kbd>Esc</kbd>/方向键/<kbd>Home</kbd>/<kbd>End</kbd>、点击外部关闭。
+  - **新增设置页开关**：「会话 / 工作区列表右键菜单」（`ctxMenuEnabled`，默认开）。**关掉时一根监听都不挂**，浏览器原生右键菜单原样保留；门控**显式订阅偏好仓库**（`prefs` 是普通 Set 仓库、不是 cordis 追踪服务，`scope.effect` 不会自动收集它），所以改开关即时生效、无需刷新页面，卸载时订阅与监听一并清理。
+  - **新增守护断言** `tools/check-context-menu.mjs`（**82/82**）并纳入 `npm run check`：手写 DOM 测试台，从 bundle 里按花括号配平取出真实函数注入沙箱执行，并求值 `CTX_ZH` 词典以核对用户真正看到的文案；覆盖判据/降级/组装/分发/键盘/拆卸/真实服务调用/异常吞掉/不引用参考插件/CSS 合并/开关门控。
+  - **断言自身的两个坑（已修，值得记下）**：① 「代码里不许出现 X」类断言必须先**剥离注释**——文件顶部与历史注释里的「参考插件：@baihejiangnan/…」「无 MutationObserver」会被当代码判红（3 条假阳性）。② 负向对照**不能靠给 `env.<fn>` 重新赋值**来改坏判据——所有函数注入同一闭包作用域，内部调用走词法绑定，赋值影响不到；必须改源码文本后**重新编译沙箱**（原写法产出的是结构性假绿）。
+  - **顺带（同一工作区内的用户要求）**：把功能一两个主按钮（供应商 / 模型）的**常态文字色改为纯白 `#fff`**——本机 DSH 主题偏好是 `system`，而 Windows `AppsUseLightTheme=0`（深色），composer 底为深色，白字对比最高；`.mss-caret` 用 `color: inherit`，箭头随字一起变白。**不引主题 token**而是写死白：`--dsw-alias-brand-text` 在本机解析为 `#0f1115`（近黑）、`--dsw-alias-label-primary-foreground` 也只在浅色主题下是白，两者都会随主题解析成非白，与用户明确要求的「白色」不符。`tools/check-model-seat-hug.mjs` 新增 4 条断言钉住「常态必须纯白 / 白字规则不外溢到面板 / 箭头随字变白 / 下拉项不被染白」（19 → 23 条）；`demo/two-button*.html` 三张预览页同步改白字，并把预览用输入框底改为深色 `#17181c`（否则白字在浅色预览页上看不见）。
+  - **弹出列表改为完全不透明实底（同批用户要求）**：功能一两个按钮点开的面板原是「90% 菜单色 + 14px 背景模糊」的毛玻璃（`color-mix(in srgb, var(--dsw-specific-menu, #fff) 90%, transparent)` + 两条 `backdrop-filter`），现改成 `background: var(--dsw-specific-menu, #fff)` 实底并删干净 blur——半透明底会把背后的深色 composer 与输入框文字透上来，读菜单时干扰明显。描边（`--dsw-alias-border-l2`）、圆角 12px、三级投影一律保留，否则实底菜单会「贴」在输入框上分不清边界；面板文字仍是 `--dsw-alias-label-primary`（深色字配浅色实底），**不跟着按钮变白**。`check-model-seat-hug` 再加 5 条断言钉住「底色不许含 transparent / 半透明、两条 blur 必须删干净、描边圆角投影必须还在、文字不许变白、面板基础规则唯一」（23 → 28 条）。
+  - **回归**：`npm run check` 退出码 0 —— 钩子钉 **7/7** + 座位钉 **28/28** + 右键钉 **82/82** + 漂移钉 **6/6** + compat-check **101/101**。`package.json` 版本 `0.4.12 → 0.4.13`。只改 `lib/client.js`、`tools/` 与文档（客户端 bundle，**无构建步骤**），刷新页面即生效。
+- **v0.4.12（历史）**：一次全量审查后的**稳定性加固**——修掉两处同类崩溃隐患、一处样式重复注入，并把三个真实事故固化成守护断言。
+  - **① 两处「条件 return 夹在 Hook 之间」崩溃隐患（本次核心）**：`ModelSeatSplit` 曾把 `if (!available) return null;` 写在两个 `useEffect` 之间；`WorkspaceNameChip` 曾把 `if (!prefsState.chipEnabled) return null;` 写在 `useWorkspaces` **之前**。二者是同一类缺陷：React 从不清空 hook 数组，只按 `hookIndex++` 覆盖，所以条件为假的那次渲染里后续 Hook 槽位残留上一次的值——若上次该槽是 `undefined`，卸载时 React 执行 `destroy()` 会抛 `undefined is not a function`。**触发面真实存在**：`available = usable && face.ok`，而 `face.ok` 来自 `try/catch` 的 `mssResolveDirectory`（`directoryFor()` 有缓存早返回，`available` 会随会话摇摆）；`chipEnabled` 则是设置页开关，用户随时可切。现两处提前返回**一律移到全部 Hook 之后**，判据收进回调内部与选择器；`useSyncExternalStore` 在 `available=false` 时照常调用（拿到的是恒定的 `MSS_EMPTY_DIRECTORY`，合法且稳定）。
+  - **② 功能二样式重复注入 + 一个差点酿成回归的耦合**：功能二原用独立 `<style id="dsh-ui-tools-wc-collapse-style">` 注入 `WC_CSS`，而**共享标签此前漏拼了 `WC_CSS`**（`tag.textContent = MSS_CSS + WSC_CSS + SET_CSS + TSP_CSS`）——即同一份规则实际由两条路径各自注入、且两个标签由不同 effect 独立拆卸（卸载中间帧折叠条样式会闪断）。现 `WC_CSS` **并入共享标签**统一注入，独立标签与其 teardown effect 一并删除。⚠️ 注意这两处是**强耦合**的：只删独立标签而不补共享标签，会直接把功能二的样式全部丢失——该耦合已由「共享标签含全部五份 CSS 哨兵」断言钉死。
+  - **③ 减少多余请求**：功能一的 `load()` 依赖数组由 `[open, available, load]` 收窄为 `[available, load]`，不再在每次开合面板时重复拉取目录。
+  - **④ 可读性**：`chooseModel` / `chooseEffort` 里 `...cond === void 0 ? {} : {...}` 靠运算符优先级生效的写法（语义正确但极易误读）改为显式条件赋值，行为完全一致。
+  - **新增两份守护断言并纳入 `npm run check`**：`tools/check-hooks-order.mjs`（**7/7**，含双向负向对照）与 `tools/check-profile-drift.mjs`（**6/6**）；`compat-check.mjs` 新增 3 条样式断言（样式标签有且仅有一个、五份 CSS 哨兵齐全、废弃 id 不再出现），断言总数 **98 → 101**。
+  - **修复 profile 安装漂移**：`~/.dsh/profiles/web/pnpm-lock.yaml` 的 specifier 与 `version` 字段均停在 `v0.4.10`（而 `package.json` 已声明 `#v0.4.11`），下次 `pnpm install` 会把插件回退；现已同步为 `#v0.4.11` / `0a75dde`，并把 v0.4.12 构建部署进 `desktop` 与 `web` 两个 profile（各自留 `client.js.bak-v0411` 备份），三处 `client.js` 字节一致（SHA256 `8A1F25BD…`）。
+  - **订正文档**：`.scratch/check-client-inject.mjs` 头部用法路径由 `node tools/...` 订正为 `node .scratch/...`（原文按该行命令跑必然 ENOENT）；`compat-check.mjs` 里「此前漏掉 0.1.6-alpha.2 / 0.1.5-rc.3」的注释与代码不符（列表里本就有），改为只陈述现状。
+  - **回归**：`npm run check` 退出码 0 —— 钩子钉 **7/7** + 座位钉 **19/19** + 漂移钉 **6/6** + compat-check **101/101**；三条负向对照均实测变红（塞回 Hook 中间的 return、从共享标签删掉 `WC_CSS`、把 lock specifier 改回 `v0.4.10`）。`package.json` 版本 `0.4.11 → 0.4.12`。只改 `lib/client.js`、`tools/` 与文档（客户端 bundle，**无构建步骤**），刷新页面即生效。
+- **v0.4.11（历史）**：**把功能一（模型双按钮）里两个主按钮的背景色显式指定为透明**，并做一次全仓库口径扫尾。
   - **透明背景（用户要求「两个按钮的背景色指定为透明框」）**：`MSS_CSS` 里 `[data-mss-btn]` 的常态 `background` 由 `color-mix(in srgb, var(--dsw-alias-brand-primary, #4176e6) 8%, transparent)` 改为 `transparent`——不再有那层 8% 品牌色底，视觉上是输入框里两个「纯文字 + 箭头」的透明框，与官方 composer 其它无底控件连成一片。**保留交互反馈**：`:hover` 与 `[aria-expanded="true"]` 仍是 16% 半透明淡色（按钮若无任何按压/展开反馈就失去可点性提示）。若后续要求连悬停也全透明，把那两条的 `background` 一并改成 `transparent` 即可。
   - **新增 5 条守护断言（`tools/check-model-seat-hug.mjs`，14 → 19 条）**：这条需求的失败模式是「改完刷新页面看不出差别」，只读源码文本抓不到（写回 `color-mix` 照样是合法 CSS），所以断言沿用它：**求值后的 CSS** 按 cascade 取实际生效声明。钉住四面：① 常态背景**必须**是 `transparent`；② 没有另设不透明的 `background-color` 把它盖掉；③ `:hover` 与 `[aria-expanded="true"]` **各自仍保留**半透明反馈（防「改一处、静默坏另一处」）；④ 该规则**不得牵连**面板内的下拉项（`[data-mss-row]` 不命中）。
   - **扫尾 ① 验证口径数字漂移**：README 与 `AGENT.md` 里的 compat-check 计数/内核路径由 `93/93` + `0.2.1-alpha.1` 更新为 **`98/98` + `0.2.1-alpha.2`**（本机现存内核副本为 `0.2.1-alpha.1` / `0.2.1-alpha.2`）。
@@ -205,7 +285,7 @@ dsh plugin --profile web add github:qgx1992/dsh-ui-tools
   - id: ui-tools
     disabled: true
   ```
-- 设置 → 插件 中的停用同样有效（五个功能同时关闭）。
+- 设置 → 插件 中的停用同样有效（六个功能同时关闭）。
 - 彻底卸载：从 bundles 与 dependencies 移除条目、删除 node_modules 内链接与本地插件目录。
 
 ## 明确不覆盖的范围
@@ -213,4 +293,4 @@ dsh plugin --profile web add github:qgx1992/dsh-ui-tools
 - 输入框里输 `/model` 弹出的命令面板选择器走的是另一套 popupSelect 组件，本插件未涉及。
 - 侧边栏折叠条只影响工作区分组展开状态，不改变其他侧边栏 UI。
 - 偏好只存当前浏览器 localStorage，不会跨浏览器/跨设备同步。
-- 插件只覆盖上面列出的五个功能；此前的「修改的文件」会话选项卡已在 v0.4.9 整体移除，其取数与速度计重复且维护成本过高（详见变更记录）。
+- 插件只覆盖上面列出的六个功能；此前的「修改的文件」会话选项卡已在 v0.4.9 整体移除，其取数与速度计重复且维护成本过高（详见变更记录）。

@@ -593,6 +593,88 @@ section("4. 主按钮背景（v0.4.11：常态透明，交互态保留反馈）"
 	else bad("透明背景规则未牵连面板内的下拉项（[data-mss-row] 不命中）");
 }
 
+section("5. 主按钮文字色（v0.4.13：常态纯白，范围不外溢）");
+{
+	const norm = (v) => (typeof v === "string" ? v.trim().toLowerCase().replace(/\s+/g, "") : v);
+	const isWhite = (v) => {
+		const s = norm(v);
+		return s === "#fff" || s === "#ffffff" || s === "white" || s === "rgb(255,255,255)" || s === "rgba(255,255,255,1)";
+	};
+
+	const btnEl = new El("button", { "data-mss-btn": "" });
+	const decls = {};
+	for (const r of rules) {
+		for (const s of r.selectors) {
+			if (btnEl.matchesSelector(s)) Object.assign(decls, r.decls);
+		}
+	}
+
+	// ① 常态文字色必须解析成纯白
+	if (isWhite(decls["color"])) ok("主按钮常态文字色 = 纯白（用户要求）");
+	else bad("主按钮常态文字色 = 纯白（用户要求）", `实得 ${JSON.stringify(decls["color"])}`);
+
+	// ② 白字规则的范围必须严格限定在 [data-mss-btn]，不许外溢到面板/其它控件
+	const whiteRules = rules.filter((r) => isWhite(r.decls["color"]));
+	if (whiteRules.length > 0 && whiteRules.every((r) => r.selectors.every((s) => s.trim() === "[data-mss-btn]"))) {
+		ok("纯白文字只落在 [data-mss-btn] 这一条规则上（未外溢到面板/其它控件）", `${whiteRules.length} 条`);
+	} else {
+		bad("纯白文字只落在 [data-mss-btn] 这一条规则上（未外溢到面板/其它控件）", whiteRules.map((r) => r.selectors.join(", ")).join(" ; ") || "一条都没有");
+	}
+
+	// ③ 箭头靠 color: inherit 跟随文字一起变白（否则白字配深色箭头）
+	const caret = rules.find((r) => r.selectors.some((s) => s.trim() === "[data-mss-btn] .mss-caret"));
+	if (caret && norm(caret.decls["color"]) === "inherit") ok("按钮内箭头用 color: inherit，随文字一起变白");
+	else bad("按钮内箭头用 color: inherit，随文字一起变白", caret ? JSON.stringify(caret.decls["color"]) : "找不到该规则");
+
+	// ④ 反向：面板内的下拉项不该被染白（浅色菜单里必须仍是深色文字）
+	const rowEl = new El("button", { "data-mss-row": "", class: "mss-row" });
+	let rowWhite = false;
+	for (const r of rules) {
+		for (const s of r.selectors) {
+			if (rowEl.matchesSelector(s) && isWhite(r.decls["color"])) rowWhite = true;
+		}
+	}
+	if (!rowWhite) ok("下拉项未被染白（[data-mss-row] 不命中任何白字规则）");
+	else bad("下拉项未被染白（[data-mss-row] 不命中任何白字规则）");
+}
+
+section("6. 弹出列表底色（v0.4.13：完全不透明实底，不许再有毛玻璃）");
+{
+	const norm = (v) => (typeof v === "string" ? v.trim().toLowerCase().replace(/\s+/g, "") : v);
+
+	const panel = rules.find((r) => r.selectors.some((s) => s.trim() === "[data-mss-panel]"));
+	const panelDecls = panel ? panel.decls : {};
+
+	// ① 面板底色必须是不透明色：不许出现 transparent / color-mix(...%, transparent) / rgba 半透明
+	const bg = norm(panelDecls["background"]);
+	const translucent = typeof bg === "string" && (bg.includes("transparent") || /rgba\([^)]*,\s*0?\.\d+\s*\)/.test(bg));
+	if (bg && !translucent) ok("面板底色是不透明实底（无 transparent / 半透明混合）", `${JSON.stringify(panelDecls["background"])}`);
+	else bad("面板底色是不透明实底（无 transparent / 半透明混合）", bg ? `实得 ${JSON.stringify(panelDecls["background"])}` : "找不到 [data-mss-panel] 的 background");
+
+	// ② 两条毛玻璃声明都必须删干净（含 -webkit- 前缀那条）
+	if (panelDecls["backdrop-filter"] === void 0 && panelDecls["-webkit-backdrop-filter"] === void 0) {
+		ok("面板不再使用 backdrop-filter（毛玻璃已移除）");
+	} else {
+		bad("面板不再使用 backdrop-filter（毛玻璃已移除）", JSON.stringify({ bf: panelDecls["backdrop-filter"], wk: panelDecls["-webkit-backdrop-filter"] }));
+	}
+
+	// ③ 分层不能一起删掉：描边 / 圆角 / 投影必须还在，否则实底菜单会「贴」在输入框上
+	const keep = ["border", "border-radius", "box-shadow"].filter((k) => panelDecls[k] !== void 0);
+	if (keep.length === 3) ok("实底化后仍保留描边 / 圆角 / 投影（浮层与 composer 仍有分层）");
+	else bad("实底化后仍保留描边 / 圆角 / 投影（浮层与 composer 仍有分层）", `缺少：${["border", "border-radius", "box-shadow"].filter((k) => panelDecls[k] === void 0).join(", ")}`);
+
+	// ④ 面板文字必须仍是主题深色（近黑），不能跟着主按钮变白——深色字配浅色实底
+	const pc = norm(panelDecls["color"]);
+	const isWhiteish = pc === "#fff" || pc === "#ffffff" || pc === "white";
+	if (pc && pc.includes("label-primary") && !isWhiteish) ok("面板文字仍是 --dsw-alias-label-primary（未跟着按钮变白）", `${JSON.stringify(panelDecls["color"])}`);
+	else bad("面板文字仍是 --dsw-alias-label-primary（未跟着按钮变白）", pc ? `实得 ${JSON.stringify(panelDecls["color"])}` : "找不到 color");
+
+	// ⑤ 反向：面板自己不许挂 backdrop-filter 的「-webkit-」残留，也不许有第二个面板规则互相打架
+	const panelRules = rules.filter((r) => r.selectors.some((s) => s.trim() === "[data-mss-panel]"));
+	if (panelRules.length === 1) ok("[data-mss-panel] 基础规则唯一（没有第二条在覆盖底色）", `${panelRules.length} 条`);
+	else bad("[data-mss-panel] 基础规则唯一（没有第二条在覆盖底色）", `实得 ${panelRules.length} 条`);
+}
+
 console.log(`\n合计 ${pass}/${pass + fail} 通过`);
 if (fail > 0) {
 	console.log("失败项：");
