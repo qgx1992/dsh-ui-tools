@@ -1054,5 +1054,5 @@ for (const row of results) {
 }
 const total = results.filter((row) => !row.section).length;
 console.log(`\n合计 ${total - failed}/${total} 通过（cordis：${located.kernel} → ${path.relative(process.cwd(), located.entry) || located.entry}）`);
-console.log("行为矩阵：新内核 5/5 功能；旧内核 4/5 功能 + 无横幅（功能五缺席属预期降级）");
+console.log("行为矩阵：新内核 5/5 槽位功能（功能六为纯 DOM、无 slot，不参与该矩阵）；旧内核 4/5 槽位功能 + 无横幅（功能五缺席属预期降级）");
 if (failed) process.exitCode = 1;

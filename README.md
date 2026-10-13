@@ -73,9 +73,11 @@ DSH Web 插件：六个 UI 工具合并成一个包，只动对应控件，不�
 | 创建会话分支 | `sessions.fork({ sessionId, increaseTitle: true })` |
 | 复制会话 ID | 写剪贴板 |
 | 复制工作目录 | 写 `session.cwd` |
-| 刷新页面 | `location.reload()` |
+| 刷新页面 | `ctxReload()`（`location.reload()` + 兜底） |
 
-**工作区行右键**（4 项）：新建会话（`workspaces.startSession(id)`）、复制工作区路径、归档工作区全部会话（逐个 `archiveSession`）、刷新页面。
+**工作区行右键**（4 项）：新建会话（`uiWorkspace.startSession(id)`）、复制工作区路径（`workspace.path` → 剪贴板）、归档工作区全部会话（逐个 `archiveSession`）、刷新页面。
+
+> ⚠ **服务契约（v0.4.13 首发踩过的坑）**：`新建会话` 只能走官方 `uiWorkspace.startSession(id)` —— `sessions` 上**没有** `startSession`；切会话同理只能走 `uiWorkspace.openSession(id)`，`sessions` 上那个 `open` **不收会话 id**。首发版误写成 `workspaces.startSession` / `sessions.open`，异常被 `ctxToast` 吞掉，用户看到的就是「点了没反应」。现在由 `tools/check-context-menu.mjs` 第 14 节的**真实方法表**逐条钉死。
 
 **选中文本时右键**（2 项）：复制所选文本、发送所选文本到输入框（填入输入框，不自动发送）。
 
@@ -96,10 +98,35 @@ DSH Web 插件：六个 UI 工具合并成一个包，只动对应控件，不�
 ### 实现原理（纯 DOM，不注册 slot）
 
 - 只挂 **document 级** 三个监听：`contextmenu`、`pointerdown`、`keydown`；菜单节点 `appendChild` 到 `body`；
-- **不注册任何 slot**，因此旧内核上也照常可用（无 alpha 依赖，不进 `alphaFeatures` 子 fiber）；用到的 `sessions` / `workspaces` 本就在入口 `inject` 里，不新增声明（守 R3）；
+- **不注册任何 slot**，因此旧内核上也照常可用（无 alpha 依赖，不进 `alphaFeatures` 子 fiber）；用到的 `sessions` / `workspaces` 本就在入口 `inject` 里，官方 `uiWorkspace` 走**可选获取**（`ctx.get("uiWorkspace")`，缺席时返回 `undefined` 并降级）—— **绝不把可选服务写进入口 `inject`**（见下方说明，守 R3）；
 - **R2 合规**：不搬动、不包裹 slot 渲染出来的任何节点，**无 `MutationObserver`、无轮询定时器** —— 菜单节点是本插件新建的，不是搬运既有节点；
 - 全部监听由 `installContextMenu()` 返回的拆卸函数解除，**插件卸载后不留补丁**（断言逐项核对 `contextmenu` / `pointerdown` / `keydown` 三类监听是否解绑干净）；
 - 动作抛错被捕获并转成提示，**不冒泡成未捕获异常**；事件已被 `preventDefault()` 时不再接管，与其他右键类插件共存不打架。
+
+### ⚠ 为什么 `uiWorkspace` 必须走可选获取，不能写进 `inject`
+
+这是 v0.4.13 首发后**真实发生**的一次事故，代价是**六个功能全部消失**：
+
+`uiWorkspace` 由官方 `dsh-client-ui-workspace` 提供，在精简 bundle / 旧内核里**可能不存在**。cordis 的 `inject` 数组语义是「**必须等到**这些服务就绪才开始」，任何一个等不到，**整条 fiber 就停在 PENDING** —— 所以把 `"uiWorkspace"` 加进入口 `inject` 的后果不是「右键菜单少一个功能」，而是：
+
+```
+dsh-ui-tools: pending (waiting for services: uiWorkspace)
+```
+
+即插件整体不激活：**五个既有功能一起消失 + 顶部加载横幅**，boot 审计报 `1 entry did not activate`。用户看到的现象是「右键菜单里的项都没效果」——极易误诊成菜单自身的事件 bug，实际菜单**根本没装上**。（这与 v0.4.2 在 `uiConversation` 上踩的是同一个坑。）
+
+**正解** —— 在子作用域里可选获取，配能力探测干净降级：
+
+```js
+ctx.inject(["sessions", "workspaces"], (scope) => {
+  const uiWorkspace = ctx.get("uiWorkspace");   // 缺席时是 undefined，不抛错
+  // 每个调用点都探测：typeof uiWorkspace?.startSession === "function"
+});
+```
+
+`ctx.get(name)` 在服务缺席时返回 `undefined` 而**不抛错**（cordis 内部 `const impl = key && this.store[key]; if (!impl) return;`），因此这条路径是干净的降级而不是崩溃。
+
+**已由断言钉死**：把 `"uiWorkspace"` 塞回入口 `inject`，`compat-check` 从 **101/101 掉到 50/85**，并精确报出 `pending (waiting for services: uiWorkspace)`。
 
 ### 交互与无障碍
 
@@ -185,14 +212,20 @@ node tools/live-smoke.mjs <URL+token>   # 真机冒烟（可选；自动探测�
   - **菜单内容**：会话行 6 项（重命名 / 归档会话 / 创建会话分支 / 复制会话 ID / 复制工作目录 / 刷新页面）；工作区行 4 项（新建会话 / 复制工作区路径 / 归档工作区全部会话 / 刷新页面）；选中文本时 2 项（复制所选文本 / 发送所选文本到输入框）。
   - **判据不依赖界面语言**：用官方写死的 `data-row-key` 前缀（`session:` / `workspace:`）识别目标，而不是「这一行有没有『会话操作』按钮」或 `aria-label` —— 官方 `row-actions` 在**空白会话 / 已归档会话**上不渲染，靠按钮存在性判定会把这类行判成非会话行（该坑由参考插件注释指出，此处按同一结论自写实现）。
   - **绝不猜**：解析三级降级（DOM 行 id → `aria-selected`→`current` → 标题唯一命中），**任何一级无法唯一确定就返回 `null` 并保留浏览器原生菜单**；标题命中多个会话时同样拒绝——宁可不管，也不操作错会话。
-  - **纯 DOM，守 R2/R3**：只挂 document 级 `contextmenu` / `pointerdown` / `keydown` 三个监听，菜单 `appendChild` 到 `body`，**不注册任何 slot、不搬动也不包裹 slot 节点、无 `MutationObserver`、无轮询定时器**；用到的 `sessions` / `workspaces` 本就在入口 `inject` 内，**不新增声明**。因此旧内核上照常可用（无 alpha 依赖，不进 `alphaFeatures` 子 fiber）。卸载时三类监听全部解绑，不留补丁。
+  - **纯 DOM，守 R2/R3**：只挂 document 级 `contextmenu` / `pointerdown` / `keydown` 三个监听，菜单 `appendChild` 到 `body`，**不注册任何 slot、不搬动也不包裹 slot 节点、无 `MutationObserver`、无轮询定时器**；用到的 `sessions` / `workspaces` 本就在入口 `inject` 内，官方 `uiWorkspace` 走**可选获取**（`ctx.get`，缺席时降级）——**不往入口 inject 里加任何可选服务**。因此旧内核上照常可用（无 alpha 依赖，不进 `alphaFeatures` 子 fiber）。卸载时三类监听全部解绑，不留补丁。
   - **健壮性**：动作抛错被捕获并转成用户可见提示（不冒泡成未捕获异常）；已 `preventDefault()` 的事件不再接管（与其他右键插件共存）；空菜单被拒绝（不弹空白方块）；危险项独立样式类。无障碍：`role=menu`/`menuitem`、roving tabindex、<kbd>Esc</kbd>/方向键/<kbd>Home</kbd>/<kbd>End</kbd>、点击外部关闭。
   - **新增设置页开关**：「会话 / 工作区列表右键菜单」（`ctxMenuEnabled`，默认开）。**关掉时一根监听都不挂**，浏览器原生右键菜单原样保留；门控**显式订阅偏好仓库**（`prefs` 是普通 Set 仓库、不是 cordis 追踪服务，`scope.effect` 不会自动收集它），所以改开关即时生效、无需刷新页面，卸载时订阅与监听一并清理。
-  - **新增守护断言** `tools/check-context-menu.mjs`（**82/82**）并纳入 `npm run check`：手写 DOM 测试台，从 bundle 里按花括号配平取出真实函数注入沙箱执行，并求值 `CTX_ZH` 词典以核对用户真正看到的文案；覆盖判据/降级/组装/分发/键盘/拆卸/真实服务调用/异常吞掉/不引用参考插件/CSS 合并/开关门控。
+  - **新增守护断言** `tools/check-context-menu.mjs`（首发 **82/82**，本批加固后 **94/94**）并纳入 `npm run check`：手写 DOM 测试台，从 bundle 里按花括号配平取出真实函数注入沙箱执行，并求值 `CTX_ZH` 词典以核对用户真正看到的文案；覆盖判据/降级/组装/分发/键盘/拆卸/真实服务调用/异常吞掉/不引用参考插件/CSS 合并/开关门控。
   - **断言自身的两个坑（已修，值得记下）**：① 「代码里不许出现 X」类断言必须先**剥离注释**——文件顶部与历史注释里的「参考插件：@baihejiangnan/…」「无 MutationObserver」会被当代码判红（3 条假阳性）。② 负向对照**不能靠给 `env.<fn>` 重新赋值**来改坏判据——所有函数注入同一闭包作用域，内部调用走词法绑定，赋值影响不到；必须改源码文本后**重新编译沙箱**（原写法产出的是结构性假绿）。
   - **顺带（同一工作区内的用户要求）**：把功能一两个主按钮（供应商 / 模型）的**常态文字色改为纯白 `#fff`**——本机 DSH 主题偏好是 `system`，而 Windows `AppsUseLightTheme=0`（深色），composer 底为深色，白字对比最高；`.mss-caret` 用 `color: inherit`，箭头随字一起变白。**不引主题 token**而是写死白：`--dsw-alias-brand-text` 在本机解析为 `#0f1115`（近黑）、`--dsw-alias-label-primary-foreground` 也只在浅色主题下是白，两者都会随主题解析成非白，与用户明确要求的「白色」不符。`tools/check-model-seat-hug.mjs` 新增 4 条断言钉住「常态必须纯白 / 白字规则不外溢到面板 / 箭头随字变白 / 下拉项不被染白」（19 → 23 条）；`demo/two-button*.html` 三张预览页同步改白字，并把预览用输入框底改为深色 `#17181c`（否则白字在浅色预览页上看不见）。
   - **弹出列表改为完全不透明实底（同批用户要求）**：功能一两个按钮点开的面板原是「90% 菜单色 + 14px 背景模糊」的毛玻璃（`color-mix(in srgb, var(--dsw-specific-menu, #fff) 90%, transparent)` + 两条 `backdrop-filter`），现改成 `background: var(--dsw-specific-menu, #fff)` 实底并删干净 blur——半透明底会把背后的深色 composer 与输入框文字透上来，读菜单时干扰明显。描边（`--dsw-alias-border-l2`）、圆角 12px、三级投影一律保留，否则实底菜单会「贴」在输入框上分不清边界；面板文字仍是 `--dsw-alias-label-primary`（深色字配浅色实底），**不跟着按钮变白**。`check-model-seat-hug` 再加 5 条断言钉住「底色不许含 transparent / 半透明、两条 blur 必须删干净、描边圆角投影必须还在、文字不许变白、面板基础规则唯一」（23 → 28 条）。
-  - **回归**：`npm run check` 退出码 0 —— 钩子钉 **7/7** + 座位钉 **28/28** + 右键钉 **82/82** + 漂移钉 **6/6** + compat-check **101/101**。`package.json` 版本 `0.4.12 → 0.4.13`。只改 `lib/client.js`、`tools/` 与文档（客户端 bundle，**无构建步骤**），刷新页面即生效。
+  - **⚠ 首发后修掉一个「全功能消失」级事故（同为用户报障，最贵的一次）**：首发版把功能六需要的官方 `uiWorkspace` 服务（由 `dsh-client-ui-workspace` 提供）直接加进了**入口** `inject`。入口 `inject` 里的任何服务缺席都会让**整条 fiber 停在 PENDING 等它**，而这个服务在精简 bundle 里可能不存在 —— 于是不是「右键菜单少个功能」，而是**五个功能全部消失 + 顶部加载横幅**，boot 审计报 `dsh-ui-tools: pending (waiting for services: uiWorkspace)`。这与 v0.4.2 在 `uiConversation` 上踩的是同一个坑（见 R3）。用户看到的表象是「右键菜单里的项都没效果」，极易误诊成菜单自身的事件 bug —— 实际菜单**根本没装上**。
+    - **修法**：`uiWorkspace` 移出入口 `inject`，改为**可选获取** —— 函数体里 `ctx.get("uiWorkspace")`（cordis 的 `get()` 在服务缺席时返回 `undefined` 而**不抛错**），配合 `typeof svc?.method === "function"` 能力探测干净降级，拿不到时给用户明确提示。现在 `ctx.inject(["sessions","workspaces"], (scope) => { const uiWorkspace = ctx.get("uiWorkspace"); … })`。
+    - **已钉死**：把 `"uiWorkspace"` 塞回入口 inject，`compat-check` 从 **101/101 掉到 50/85**，并精确报出 `pending (waiting for services: uiWorkspace)`。
+  - **同一批修掉的动作失效**：`新建会话` / `复制工作区路径` / `刷新页面` / `归档` / `分叉` 曾因调用**内核里不存在的方法**（`workspaces.startSession`、`sessions.open`）而静默失效（异常被 `ctxToast` 吞掉 = 用户看到「没反应」）。全部改调真实存在的官方方法：`uiWorkspace.startSession` / `uiWorkspace.openSession`；`刷新页面` 走自写的 `ctxReload()`（`location.reload()` + 兜底）。
+  - **新增守护断言** `tools/check-context-menu.mjs`（**82/82 → 94/94**）：新增第 14 节 **服务契约**——① 列出**真实方法表**（`sessions` / `workspaces` / `uiWorkspace` 各自真实存在的方法名）逐条核对源码没有调用表外方法；② 点名两条历史写错的（`sessions.open`、`workspaces.startSession`）；③ 两组运行时负向对照。**这一节的由来值得记**：首发时 §8 的假服务把 `startSession` 挂在 `workspaces` 上、把 `open` 挂在 `sessions` 上，测试台照着一个**不存在的契约**写，于是断言把 bug 固化成了「正确」、全绿放行 —— **断言的价值上限 = 假数据对真实契约的还原度**。
+  - **回归**：`npm run check` 退出码 0 —— 钩子钉 **7/7** + 座位钉 **28/28** + 右键钉 **94/94** + 漂移钉 **4/4** + compat-check **101/101**；行为矩阵「新内核 5/5 槽位功能（功能六为纯 DOM、无 slot，不参与该矩阵）」。（三组负向对照均真红：`uiWorkspace` 塞回 inject → compat-check 50/85；改调 `workspaces.startSession` → 右键钉 91/94；删掉 `location.reload()` → 右键钉 93/94。）
+  - `package.json` 版本 `0.4.12 → 0.4.13`。只改 `lib/client.js`、`tools/` 与文档（客户端 bundle，**无构建步骤**），刷新页面即生效。
 - **v0.4.12（历史）**：一次全量审查后的**稳定性加固**——修掉两处同类崩溃隐患、一处样式重复注入，并把三个真实事故固化成守护断言。
   - **① 两处「条件 return 夹在 Hook 之间」崩溃隐患（本次核心）**：`ModelSeatSplit` 曾把 `if (!available) return null;` 写在两个 `useEffect` 之间；`WorkspaceNameChip` 曾把 `if (!prefsState.chipEnabled) return null;` 写在 `useWorkspaces` **之前**。二者是同一类缺陷：React 从不清空 hook 数组，只按 `hookIndex++` 覆盖，所以条件为假的那次渲染里后续 Hook 槽位残留上一次的值——若上次该槽是 `undefined`，卸载时 React 执行 `destroy()` 会抛 `undefined is not a function`。**触发面真实存在**：`available = usable && face.ok`，而 `face.ok` 来自 `try/catch` 的 `mssResolveDirectory`（`directoryFor()` 有缓存早返回，`available` 会随会话摇摆）；`chipEnabled` 则是设置页开关，用户随时可切。现两处提前返回**一律移到全部 Hook 之后**，判据收进回调内部与选择器；`useSyncExternalStore` 在 `available=false` 时照常调用（拿到的是恒定的 `MSS_EMPTY_DIRECTORY`，合法且稳定）。
   - **② 功能二样式重复注入 + 一个差点酿成回归的耦合**：功能二原用独立 `<style id="dsh-ui-tools-wc-collapse-style">` 注入 `WC_CSS`，而**共享标签此前漏拼了 `WC_CSS`**（`tag.textContent = MSS_CSS + WSC_CSS + SET_CSS + TSP_CSS`）——即同一份规则实际由两条路径各自注入、且两个标签由不同 effect 独立拆卸（卸载中间帧折叠条样式会闪断）。现 `WC_CSS` **并入共享标签**统一注入，独立标签与其 teardown effect 一并删除。⚠️ 注意这两处是**强耦合**的：只删独立标签而不补共享标签，会直接把功能二的样式全部丢失——该耦合已由「共享标签含全部五份 CSS 哨兵」断言钉死。

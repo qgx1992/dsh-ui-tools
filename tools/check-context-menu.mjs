@@ -422,6 +422,18 @@ function makeSandboxArgs(fn, realSetTimeout) {
 /* ── 会话 / 工作区假数据 ── */
 
 /**
+ * 统一的挂载入口。
+ *
+ * installContextMenu(scope, t, uiWorkspace) 的第三个参数是**可选**的
+ * uiWorkspace 服务（真机上由子 fiber 用 ctx.get("uiWorkspace") 取，
+ * 缺席时是 undefined）。测试台一律从 scope 里取同名属性传进去，
+ * 保证「测试台怎么传」和「真机怎么传」是同一个形状。
+ */
+function install(env, scope) {
+	return env.installContextMenu(scope, makeT(CTX_ZH), scope.uiWorkspace);
+}
+
+/**
  * 从 lib/client.js 里取出 CTX_ZH 词典并在测试台里求值。
  * 这样断言核对的是**用户真正会看到的文案**，而不是 stub 返回的键名 ——
  * 文案写错 / 漏 key 才会被发现。
@@ -474,17 +486,33 @@ function makeStores() {
 		],
 	};
 	const calls = { archived: [], forked: [], opened: [], started: [] };
+	// ── 以下三个 mock 严格按**真实内核**的公开方法表来搭 ──
+	//
+	// 曾经的 mock 把 startSession 放在 workspaces 上、把 open 放在 sessions 上，
+	// 于是断言「通过」了，但真实内核上根本没有这两个方法 —— 测试台自己把 bug
+	// 固化了。真实契约（0.2.0-rc.2 实测）：
+	//   · sessions  = 浏览器侧 SessionController：有 fork(opts)（返回裸 childId
+	//                 字符串）、list、binding、create…，**没有 open**。
+	//   · workspaces = 浏览器侧 WorkspaceController：有 list、archiveSession(id,
+	//                 opts)（收**裸字符串**）、unarchiveSession、pinSession、
+	//                 create/rename/delete…，**没有 startSession**。
+	//   · uiWorkspace = 官方 UiWorkspaceService（dsh-client-ui-workspace）：
+	//                 startSession(workspaceId)、openSession(sessionId)。
+	// 因此这里刻意**不给** sessions.open、**不给** workspaces.startSession，
+	// 让「用错服务」的写法在测试台上就直接暴露成 TypeError。
 	const sessions = {
 		list: { getSnapshot: () => sessionsState },
 		fork: (args) => { calls.forked.push(args); return Promise.resolve("s3"); },
-		open: (id) => { calls.opened.push(id); },
 	};
 	const workspaces = {
 		list: { getSnapshot: () => workspacesState },
 		archiveSession: (id) => { calls.archived.push(id); return Promise.resolve(); },
-		startSession: (id) => { calls.started.push(id); },
 	};
-	return { sessions, workspaces, calls, sessionsState, workspacesState };
+	const uiWorkspace = {
+		startSession: (id) => { calls.started.push(id); },
+		openSession: (id) => { calls.opened.push(id); },
+	};
+	return { sessions, workspaces, uiWorkspace, calls, sessionsState, workspacesState };
 }
 
 /* ── 搭出官方工作区树的 DOM 骨架（data-row-key 是稳定标识） ── */
@@ -657,8 +685,8 @@ section("5. 事件分发：会话行 / 工作区行 / 选中文本 / 未识别�
 	{
 		const env = buildEnv();
 		const tree = buildTree(env);
-		const { sessions, workspaces, calls } = makeStores();
-		env.installContextMenu({ sessions, workspaces }, makeT(CTX_ZH));
+		const { sessions, workspaces, uiWorkspace, calls } = makeStores();
+		install(env, { sessions, workspaces, uiWorkspace });
 		const event = makeEvent("contextmenu", { clientX: 50, clientY: 60 });
 		tree.sessionRow.dispatchEvent(event);
 		const menu = document.body.querySelector(".dsh-ctx-menu");
@@ -689,8 +717,8 @@ section("5. 事件分发：会话行 / 工作区行 / 选中文本 / 未识别�
 	{
 		const env = buildEnv();
 		const tree = buildTree(env);
-		const { sessions, workspaces } = makeStores();
-		env.installContextMenu({ sessions, workspaces }, makeT(CTX_ZH));
+		const { sessions, workspaces, uiWorkspace } = makeStores();
+		install(env, { sessions, workspaces, uiWorkspace });
 		const event = makeEvent("contextmenu", { clientX: 50, clientY: 20 });
 		tree.rootRow.dispatchEvent(event);
 		const menu = document.body.querySelector(".dsh-ctx-menu");
@@ -710,8 +738,8 @@ section("5. 事件分发：会话行 / 工作区行 / 选中文本 / 未识别�
 	{
 		const env = buildEnv();
 		buildTree(env);
-		const { sessions, workspaces } = makeStores();
-		env.installContextMenu({ sessions, workspaces }, makeT(CTX_ZH));
+		const { sessions, workspaces, uiWorkspace } = makeStores();
+		install(env, { sessions, workspaces, uiWorkspace });
 		const paragraph = new Element("p");
 		paragraph.textContent = "被选中的一段话";
 		document.body.appendChild(paragraph);
@@ -732,8 +760,8 @@ section("5. 事件分发：会话行 / 工作区行 / 选中文本 / 未识别�
 	{
 		const env = buildEnv();
 		buildTree(env);
-		const { sessions, workspaces } = makeStores();
-		env.installContextMenu({ sessions, workspaces }, makeT(CTX_ZH));
+		const { sessions, workspaces, uiWorkspace } = makeStores();
+		install(env, { sessions, workspaces, uiWorkspace });
 		window.__selection = null;
 		const blank = new Element("div");
 		document.body.appendChild(blank);
@@ -749,8 +777,8 @@ section("5. 事件分发：会话行 / 工作区行 / 选中文本 / 未识别�
 	{
 		const env = buildEnv();
 		const tree = buildTree(env);
-		const { sessions, workspaces } = makeStores();
-		env.installContextMenu({ sessions, workspaces }, makeT(CTX_ZH));
+		const { sessions, workspaces, uiWorkspace } = makeStores();
+		install(env, { sessions, workspaces, uiWorkspace });
 		const event = makeEvent("contextmenu", { clientX: 5, clientY: 5 });
 		event.preventDefault();
 		const before = document.body.querySelector(".dsh-ctx-menu");
@@ -764,8 +792,8 @@ section("6. 键盘与交互：Esc 关闭、方向键、外部点击关闭");
 {
 	const env = buildEnv();
 	buildTree(env);
-	const { sessions, workspaces } = makeStores();
-	env.installContextMenu({ sessions, workspaces }, makeT(CTX_ZH));
+	const { sessions, workspaces, uiWorkspace } = makeStores();
+	install(env, { sessions, workspaces, uiWorkspace });
 
 	const tree = { rootRow: document.body.children[0] };
 	const sessionRow = document.body.querySelector('[data-row-key="session:s1"]');
@@ -810,8 +838,8 @@ section("7. 拆卸：卸载后不留补丁（监听全部解绑）");
 {
 	const env = buildEnv();
 	const tree = buildTree(env);
-	const { sessions, workspaces } = makeStores();
-	const dispose = env.installContextMenu({ sessions, workspaces }, makeT(CTX_ZH));
+	const { sessions, workspaces, uiWorkspace } = makeStores();
+	const dispose = install(env, { sessions, workspaces, uiWorkspace });
 
 	const before = document.listeners.get("contextmenu").length;
 	if (before > 0) ok("拆卸前已挂 contextmenu 监听", String(before));
@@ -840,12 +868,12 @@ section("7. 拆卸：卸载后不留补丁（监听全部解绑）");
 }
 
 section("8. 动作真的调到了官方服务（不是空壳）");
-{
+await (async () => {
 	// 归档
 	const env = buildEnv();
 	const tree = buildTree(env);
-	const { sessions, workspaces, calls } = makeStores();
-	env.installContextMenu({ sessions, workspaces }, makeT(CTX_ZH));
+	const { sessions, workspaces, uiWorkspace, calls } = makeStores();
+	install(env, { sessions, workspaces, uiWorkspace });
 	tree.sessionRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
 	let menu = document.body.querySelector(".dsh-ctx-menu");
 	let item = menu.querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("归档会话"));
@@ -857,48 +885,62 @@ section("8. 动作真的调到了官方服务（不是空壳）");
 	const env2 = buildEnv();
 	const tree2 = buildTree(env2);
 	const s2 = makeStores();
-	env2.installContextMenu({ sessions: s2.sessions, workspaces: s2.workspaces }, makeT(CTX_ZH));
+	install(env2, { sessions: s2.sessions, workspaces: s2.workspaces, uiWorkspace: s2.uiWorkspace });
 	tree2.sessionRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
 	menu = document.body.querySelector(".dsh-ctx-menu");
 	item = menu.querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("创建会话分支"));
 	item.dispatchEvent(makeEvent("click"));
 	if (s2.calls.forked.length === 1 && s2.calls.forked[0].sessionId === "s1") ok("「创建会话分支」调用 sessions.fork({sessionId:s1})", JSON.stringify(s2.calls.forked[0]));
 	else bad("「创建会话分支」调用 sessions.fork", JSON.stringify(s2.calls.forked));
+	// 分叉后必须切到子会话，且必须走 uiWorkspace.openSession ——
+	// sessions.open() 虽然**存在**，但它不收参数、只是打开事件流，
+	// 传 sessionId 进去不报错也**不会切会话**（这是最阴的一种错法：
+	// 语法合法、运行不抛、用户只看到「点了没反应」）。
+	// fork 是异步的（返回 Promise，真机走 RPC），所以这里必须让出一个
+	// 微任务轮次再断言，否则读到的永远是空数组。
+	await Promise.resolve();
+	await Promise.resolve();
+	if (s2.calls.opened.length === 1 && s2.calls.opened[0] === "s3") ok("分叉后走 uiWorkspace.openSession(childId) 切到子会话", s2.calls.opened.join(","));
+	else bad("分叉后走 uiWorkspace.openSession(childId)", s2.calls.opened.join(",") || "（空 —— fork 之后没切会话）");
 
 	// 工作区：新建会话
 	const env3 = buildEnv();
 	const tree3 = buildTree(env3);
 	const s3 = makeStores();
-	env3.installContextMenu({ sessions: s3.sessions, workspaces: s3.workspaces }, makeT(CTX_ZH));
+	install(env3, { sessions: s3.sessions, workspaces: s3.workspaces, uiWorkspace: s3.uiWorkspace });
 	tree3.rootRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
 	menu = document.body.querySelector(".dsh-ctx-menu");
 	item = menu.querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("新建会话"));
 	item.dispatchEvent(makeEvent("click"));
-	if (s3.calls.started.length === 1 && s3.calls.started[0] === "w1") ok("「新建会话」调用 workspaces.startSession(w1)", s3.calls.started.join(","));
-	else bad("「新建会话」调用 workspaces.startSession", s3.calls.started.join(","));
+	// 「新建会话」必须走 uiWorkspace.startSession；workspaces 是纯
+	// WorkspaceController，没有 startSession（直接调会抛
+	// "workspaces.startSession is not a function"）。
+	if (s3.calls.started.length === 1 && s3.calls.started[0] === "w1") ok("「新建会话」调用 uiWorkspace.startSession(w1)", s3.calls.started.join(","));
+	else bad("「新建会话」调用 uiWorkspace.startSession", s3.calls.started.join(","));
 
 	// 工作区：归档全部
 	const env4 = buildEnv();
 	const tree4 = buildTree(env4);
 	const s4 = makeStores();
-	env4.installContextMenu({ sessions: s4.sessions, workspaces: s4.workspaces }, makeT(CTX_ZH));
+	install(env4, { sessions: s4.sessions, workspaces: s4.workspaces, uiWorkspace: s4.uiWorkspace });
 	tree4.rootRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
 	menu = document.body.querySelector(".dsh-ctx-menu");
 	item = menu.querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("归档工作区全部会话"));
 	item.dispatchEvent(makeEvent("click"));
 	if (s4.calls.archived.length === 2) ok("「归档全部」逐个调用 archiveSession（2 个）", s4.calls.archived.join(","));
 	else bad("「归档全部」逐个调用 archiveSession", s4.calls.archived.join(","));
-}
+})();
 
 section("9. 健壮性：动作抛错不冒泡成未捕获异常");
 {
 	const env = buildEnv();
 	const tree = buildTree(env);
 	const boom = {
-		sessions: { list: { getSnapshot: () => ({ current: "s1", ids: ["s1"], byId: { s1: { id: "s1", title: "甲" } } }) }, fork: () => { throw new Error("boom"); }, open: () => {} },
+		sessions: { list: { getSnapshot: () => ({ current: "s1", ids: ["s1"], byId: { s1: { id: "s1", title: "甲" } } }) }, fork: () => { throw new Error("boom"); } },
 		workspaces: { list: { getSnapshot: () => ({ items: [] }) }, archiveSession: () => { throw new Error("boom"); } },
+		uiWorkspace: { startSession: () => { throw new Error("boom"); }, openSession: () => { throw new Error("boom"); } },
 	};
-	env.installContextMenu(boom, makeT(CTX_ZH));
+	install(env, boom);
 	tree.sessionRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
 	const menu = document.body.querySelector(".dsh-ctx-menu");
 	const item = menu.querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("归档会话"));
@@ -1054,7 +1096,7 @@ section("13. 设置页开关门控：默认开 / 关掉后一根监听都不挂 
 	else bad("设置页渲染了 ctxMenu.enabled 开关行");
 
 	// 13b 关掉开关时必须走「不安装」分支，而不是安装了再隐藏
-	if (/if \(enabled\) teardown = installContextMenu\(scope, ctxT\)/.test(code)) ok("门控：仅在 enabled 时调用 installContextMenu（关掉=不挂监听）");
+	if (/if \(enabled\) teardown = installContextMenu\(scope, ctxT, uiWorkspace\)/.test(code)) ok("门控：仅在 enabled 时调用 installContextMenu（关掉=不挂监听）");
 	else bad("门控：仅在 enabled 时调用 installContextMenu");
 
 	if (/prefs\.subscribe\(sync\)/.test(code)) ok("门控：订阅 prefs，改开关即时生效（无需刷新页面）");
@@ -1107,6 +1149,123 @@ section("13. 设置页开关门控：默认开 / 关掉后一根监听都不挂 
 	// 13d effect 里必须把订阅与监听一起清理（卸载不留补丁）
 	if (/unsubscribe\(\)/.test(code) && /ui-tools: session\/workspace context menu/.test(code)) ok("effect 清理段同时解除 prefs 订阅与菜单监听");
 	else bad("effect 清理段同时解除 prefs 订阅与菜单监听");
+}
+
+/* ══════════════════════════════════════════════════════════════
+ * 14. 服务契约：动作只能调**真实存在**的官方方法
+ * ══════════════════════════════════════════════════════════════
+ *
+ * 这一段是补票的。v0.4.13 首发时右键菜单里「新建会话 / 复制工作区路径 /
+ * 刷新页面 / 归档 / 分叉」几乎全失效，而当时 §8 是**全绿**的 —— 因为
+ * §8 的假服务把 startSession 挂在 workspaces 上、把 open 挂在 sessions 上，
+ * 测试台自己照着一个**不存在的契约**写，于是断言把 bug 固化成了「正确」。
+ *
+ * 教训：断言的价值上限 = 假数据对真实契约的还原度。所以这里做两件事：
+ *   a) 用**真实方法表**卡死：把内核里真实存在的方法名列出来，逐条核对
+ *      源码没有调用表外方法；
+ *   b) 运行时负向对照：把动作实现改成「调不存在的服务」，确认断言变红。
+ */
+section("14. 服务契约：动作只能调真实存在的官方方法");
+{
+	const code = stripComments(src);
+	// ── 真实契约（0.2.0-rc.2 实测，见文件头注释） ──
+	//
+	// 注意 sessions **有** 一个叫 open() 的方法，但它**不收参数**，是传输层
+	// 「打开本会话的事件流」，跟「切到某个会话」毫无关系（实测
+	// dsh-api-session-controller/lib/client.js 里 open() 无参）。
+	// 切会话只有一条路：uiWorkspace.openSession(sessionId) → replaceMain(id,
+	// signal, "reveal")。这正是 v0.4.13 首发翻车的形态：写成
+	// sessions.open(childId) 语法合法、运行也不抛错，只是**什么都没发生**。
+	const REAL_SESSIONS = ["list", "fork", "binding", "create", "rename", "delete", "archive", "unarchive", "pin", "unpin", "open", "switch", "refresh", "search", "subagentAddress", "sessionAddress", "clear", "cancel", "prompt"];
+	const REAL_WORKSPACES = ["list", "archiveSession", "unarchiveSession", "pinSession", "unpinSession", "create", "rename", "delete", "openPath"];
+	const REAL_UI_WORKSPACE = ["startSession", "openSession"];
+
+	// 源码里出现过的 scope.<svc>.<method> 调用点
+	const callSites = [...code.matchAll(/\b(sessions|workspaces|uiWorkspace)\s*\.\s*([A-Za-z_$][\w$]*)\s*\(/g)]
+		.map((m) => ({ svc: m[1], method: m[2] }));
+
+	const table = { sessions: REAL_SESSIONS, workspaces: REAL_WORKSPACES, uiWorkspace: REAL_UI_WORKSPACE };
+	const illegal = callSites.filter((c) => !table[c.svc].includes(c.method));
+
+	if (callSites.length > 0) ok(`扫到 ${callSites.length} 处服务调用点（去重后 ${new Set(callSites.map((c) => `${c.svc}.${c.method}`)).size} 个方法）`);
+	else bad("扫到服务调用点", "0 处 —— 正则可能失配");
+
+	if (illegal.length === 0) ok("没有任何一处调用真实内核不存在的方法");
+	else bad("调用了真实内核不存在的方法", [...new Set(illegal.map((c) => `${c.svc}.${c.method}`))].join(", "));
+
+	// 反向：sessions.open 与 workspaces.startSession 是**真实不存在**的，
+	// 源码里一旦出现就是 bug。这条比上面那条更尖锐，因为它点名了两个
+	// 历史上真的写错过的方法。
+	const banned = [["sessions", "open"], ["workspaces", "startSession"]];
+	const hit = banned.filter(([svc, method]) => new RegExp(`\\b${svc}\\s*\\.\\s*${method}\\s*\\(`).test(code));
+	if (hit.length === 0) ok("没有调用 sessions.open / workspaces.startSession（这两个内核里不存在）");
+	else bad("调用了内核里不存在的方法", hit.map(([s, m]) => `${s}.${m}`).join(", "));
+
+	// 刷新页面：必须走 ctxReload()（内部才是 window.location.reload），
+	// 不能各写各的 —— 集中一处才能保证「被吞就 replace 保底」这条逻辑
+	// 覆盖到全部三个调用点。
+	const reloadCount = (code.match(/window\s*\.\s*location\s*\.\s*reload\s*\(\s*\)/g) || []).length;
+	const reloadCallers = (code.match(/run:\s*\(\)\s*=>\s*\{\s*ctxReload\s*\(\s*\)\s*;\s*\}/g) || []).length;
+	if (reloadCount === 1) ok("window.location.reload() 全文件只有一处（集中在 ctxReload 里）");
+	else bad("window.location.reload() 出现次数不是 1", `实际 ${reloadCount} 处`);
+	if (reloadCallers === 3) ok("三个「刷新页面」菜单项都走 ctxReload()");
+	else bad("三个「刷新页面」菜单项都走 ctxReload()", `ctxReload() 调用 ${reloadCallers} 次`);
+	// 保底路径必须存在
+	if (/location\s*\.\s*replace\s*\(\s*window\s*\.\s*location\s*\.\s*href\s*\)/.test(code)) ok("ctxReload 里有 location.replace(href) 保底（防 reload 被吞）");
+	else bad("ctxReload 缺少 location.replace 保底");
+
+	// 复制工作区路径：菜单项**必须始终存在**，不能因 path 为空就静默省略
+	// —— 那正是 v0.4.13 首发用户报「点了没反应」的形态。
+	if (/path === "" \? null/.test(code)) bad("「复制工作区路径」在 path 为空时被静默省略（应保留并给提示）");
+	else ok("「复制工作区路径」不在 path 为空时静默省略");
+	if (/fail\.noWorkspacePath/.test(code)) ok("path 读不到时有明确提示文案（fail.noWorkspacePath）");
+	else bad("path 读不到时没有提示文案");
+
+	// 复制工作区路径：走 ctxCopy（有降级路径），不是直接 clipboard.writeText
+	if (/workspace\.path/.test(code) && /ctxCopy\s*\(/.test(code)) ok("「复制工作区路径」取 workspace.path 并交给 ctxCopy（带 execCommand 降级）");
+	else bad("「复制工作区路径」取数/复制写法不对");
+
+	// ── 运行时负向对照 A：把「新建会话」改回调 workspaces.startSession ──
+	// 这正是 v0.4.13 首发的真实 bug。把 uiWorkspace.startSession 换成
+	// workspaces.startSession 后，若测试台仍给 workspaces 补上该方法的假实现，
+	// 断言就会放过 —— 所以这里**故意补上假实现**，验证测试台的守护确实
+	// 依赖「假服务忠实还原真契约」，而不是依赖运气。
+	{
+		const brokenEnv = buildBrokenEnv("installContextMenu", (text) =>
+			text.replace(/uiWorkspace\s*\.\s*startSession\s*\(/g, "workspaces.startSession("));
+		const env = makeSandboxArgs(brokenEnv, setTimeout);
+		const tree = buildTree(env);
+		const stores = makeStores();
+		// 假服务比真机宽松：真机 workspaces 上没有 startSession
+		stores.workspaces.startSession = (id) => { stores.calls.started.push(id); };
+		install(env, { sessions: stores.sessions, workspaces: stores.workspaces, uiWorkspace: stores.uiWorkspace });
+		tree.rootRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
+		const menu = document.body.querySelector(".dsh-ctx-menu");
+		const item = menu.querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("新建会话"));
+		item.dispatchEvent(makeEvent("click"));
+		// 若「假服务宽松就能骗过测试台」，说明 §14 的价值全在静态方法表那两条上；
+		// 这条对照把这件事**显式记录**下来。
+		if (stores.calls.started.length === 1) ok("负向对照 A：假服务补上 workspaces.startSession 时确能骗过运行时断言（故静态方法表是本段的真正防线）");
+		else bad("负向对照 A 未按预期执行", `started=${stores.calls.started.length}`);
+	}
+
+	// ── 运行时负向对照 B：删掉 uiWorkspace 后动作必须整体失效 ──
+	// 证明这些动作**真的依赖** uiWorkspace，而不是碰巧走了别处。
+	{
+		const env = buildEnv();
+		const tree = buildTree(env);
+		const stores = makeStores();
+		delete stores.uiWorkspace.startSession;
+		delete stores.uiWorkspace.openSession;
+		install(env, { sessions: stores.sessions, workspaces: stores.workspaces, uiWorkspace: stores.uiWorkspace });
+		tree.rootRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
+		const menu = document.body.querySelector(".dsh-ctx-menu");
+		const item = menu.querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("新建会话"));
+		let threw = false;
+		try { item.dispatchEvent(makeEvent("click")); } catch (error) { threw = true; }
+		if (!threw) ok("负向对照 B：uiWorkspace 缺方法时异常被 ctxToast 吞掉（用户看到的是「没反应」，非崩溃）");
+		else bad("负向对照 B：动作异常冒泡出去了");
+	}
 }
 
 /* ══════════════════════════════════════════════════════════════
