@@ -246,8 +246,13 @@ const window = {
 	innerWidth: 1280,
 	innerHeight: 800,
 	listeners: new Map(),
-	location: { reload() { window.__reloaded = true; } },
+	location: { reload() { window.__reloaded = true; }, replace() { window.__replaced = true; } },
 	__reloaded: false,
+	__replaced: false,
+	// 真机 window 上就有 setTimeout；ctxReload 的「reload 被吞就 replace 保底」
+	// 那条路径要用它。测试台缺了它会抛 "window.setTimeout is not a function"，
+	// 把「实现是对的」误判成「点了报错」——那是断言自身的假红。
+	setTimeout(fn, ms) { return setTimeout(fn, ms); },
 	addEventListener(type, fn) {
 		if (!this.listeners.has(type)) this.listeners.set(type, []);
 		this.listeners.get(type).push(fn);
@@ -342,7 +347,7 @@ function extractFunction(name) {
 const wanted = [
 	"ctxSessionRowId", "ctxWorkspaceRowId", "ctxRowFrom",
 	"ctxResolveSession", "ctxResolveWorkspace",
-	"ctxCopy", "ctxToast", "ctxInsertIntoComposer",
+	"ctxCopy", "ctxToast", "ctxReload", "ctxInsertIntoComposer",
 	"ctxOpenOfficialRename", "ctxMenuItem", "ctxSeparator",
 	"closeCtxMenu", "ctxPositionMenu", "ctxOpenMenu", "installContextMenu",
 ];
@@ -396,7 +401,13 @@ function buildBrokenEnv(target, mutate) {
 	return brokenSandbox;
 }
 
-function buildEnv() {
+/**
+ * 建一个空的假 DOM 环境。
+ *
+ * @param {Function} [factory] 沙箱工厂；省略时用正常源码编译出的 sandbox。
+ *   负向对照必须传 buildBrokenEnv(...) 的结果，否则「坏代码」根本没被求值。
+ */
+function buildEnv(factory) {
 	const body = new Element("body");
 	document.body = body;
 	document.documentElement = new Element("html");
@@ -404,9 +415,10 @@ function buildEnv() {
 	document.listeners = new Map();
 	window.listeners = new Map();
 	window.__reloaded = false;
+	window.__replaced = false;
 	window.__selection = null;
 	const realSetTimeout = setTimeout;
-	return makeSandboxArgs(sandbox, realSetTimeout);
+	return makeSandboxArgs(factory === void 0 ? sandbox : factory, realSetTimeout);
 }
 
 /** 统一的调用参数（正常沙箱与坏沙箱共用）。 */
@@ -931,6 +943,114 @@ await (async () => {
 	else bad("「归档全部」逐个调用 archiveSession", s4.calls.archived.join(","));
 })();
 
+section("8b. 真机回归 A：元素级 blur 不许把菜单关掉（v0.4.14「所有菜单项点了没反应」的根因）");
+{
+	// 真机事实（HUD 轨迹实证）：
+	//   C:pointerdown>span IN_MENU ON_ITEM → C:mousedown>span IN_MENU ON_ITEM
+	//   → C:pointerup>div…projectRow[data-row-key=workspace:…] → MENU_CLOSED
+	// 全程**没有 C:click**。原因：鼠标按下时焦点从「上一项/菜单容器」移走，
+	// 触发**元素级 blur**；blur 不冒泡但**有捕获阶段**，而旧代码注册的是
+	// window.addEventListener("blur", onViewportChange, true) —— window 上的
+	// 捕获监听会收到每一个元素级 blur → closeCtxMenu() 把菜单从 DOM 删掉 →
+	// 随后的 mouseup 落在菜单下面的会话/工作区行上 → click 永不派发。
+	// 于是「复制工作区路径」「刷新页面」等所有项一起失效。
+	const env = buildEnv();
+	const tree = buildTree(env);
+	const s = makeStores();
+	const teardown = install(env, { sessions: s.sessions, workspaces: s.workspaces, uiWorkspace: s.uiWorkspace });
+	tree.rootRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
+	const menu = document.body.querySelector(".dsh-ctx-menu");
+	if (menu !== null) ok("工作区行右键弹出菜单");
+	else bad("工作区行右键弹出菜单");
+
+	const blurFns = window.listeners.get("blur") || [];
+	if (blurFns.length === 1) ok("window 上只注册了一个 blur 监听");
+	else bad("window 上的 blur 监听数量不是 1", `实际 ${blurFns.length}`);
+
+	const firstItem = menu === null ? null : menu.querySelectorAll('[role="menuitem"]')[0];
+	if (firstItem !== null && firstItem !== void 0) {
+		for (const fn of blurFns) fn(makeEvent("blur", { target: firstItem }));
+		if (document.body.querySelector(".dsh-ctx-menu") !== null) ok("元素级 blur（捕获阶段才会到 window）不关菜单 —— 菜单项 click 有活路");
+		else bad("元素级 blur 把菜单关掉了 —— click 会被吞，所有菜单项静默失效");
+	}
+
+	// 真正的窗口失焦仍然要关（这条是上面那条的「不许矫枉过正」对照）
+	for (const fn of blurFns) fn(makeEvent("blur", { target: window }));
+	if (document.body.querySelector(".dsh-ctx-menu") === null) ok("窗口自身失焦仍然关菜单");
+	else bad("窗口失焦没有关菜单");
+
+	// ── 负向对照：把 blur 那行改回旧写法，确认上面那条断言真的会红 ──
+	{
+		const brokenEnv = buildBrokenEnv("installContextMenu", (text) =>
+			text.replace('window.addEventListener("blur", onWindowBlur);', 'window.addEventListener("blur", onViewportChange, true);'));
+		const broken = buildEnv(brokenEnv);
+		const brokenTree = buildTree(broken);
+		const bs = makeStores();
+		install(broken, { sessions: bs.sessions, workspaces: bs.workspaces, uiWorkspace: bs.uiWorkspace });
+		brokenTree.rootRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
+		const brokenMenu = document.body.querySelector(".dsh-ctx-menu");
+		const brokenItem = brokenMenu === null ? null : brokenMenu.querySelectorAll('[role="menuitem"]')[0];
+		if (brokenItem !== null && brokenItem !== void 0) {
+			for (const fn of (window.listeners.get("blur") || [])) fn(makeEvent("blur", { target: brokenItem }));
+			if (document.body.querySelector(".dsh-ctx-menu") === null) ok("负向对照：旧写法（window blur + capture:true）确实会关掉菜单 —— 本条断言有效");
+			else bad("负向对照失效：旧写法竟然没关掉菜单");
+		}
+	}
+	teardown();
+}
+
+section("8c. 真机回归 B：点「刷新页面」必须真的触发 reload（v0.4.14 抛 t is not defined）");
+{
+	// 真机事实：点「刷新页面」后窗口标题/页面状态完全没变，底部 toast 显示
+	// **"t is not defined"**。原因：ctxReload 在**模块作用域**，却写了
+	// ctxToast(t("toast.reloading")) —— t 是 installContextMenu(scope, t, …)
+	// 的形参，模块作用域取不到，ReferenceError 在 try 之前就抛出，
+	// window.location.reload() 根本没执行。
+	// 所以本插件的两个报障（复制工作区路径 / 刷新页面）是两个**独立** bug。
+	const env = buildEnv();
+	const tree = buildTree(env);
+	const s = makeStores();
+	install(env, { sessions: s.sessions, workspaces: s.workspaces, uiWorkspace: s.uiWorkspace });
+	tree.rootRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
+	const menu = document.body.querySelector(".dsh-ctx-menu");
+	const item = menu === null ? void 0 : menu.querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("刷新页面"));
+	if (item === void 0 || item === null) bad("工作区菜单里没有「刷新页面」项");
+	else {
+		let threw = null;
+		try { item.dispatchEvent(makeEvent("click")); } catch (error) { threw = error; }
+		if (threw === null) ok("点「刷新页面」不抛异常");
+		else bad("点「刷新页面」抛异常", String((threw && threw.message) || threw));
+		if (window.__reloaded === true) ok("点「刷新页面」真的调用了 window.location.reload()");
+		else bad("点「刷新页面」没有调用 reload（用户看到的就是「没效果」）");
+		const toast = document.body.querySelector(".dsh-ctx-toast");
+		if (toast !== null && toast.textContent.includes("刷新")) ok("刷新前有用户可见提示", toast.textContent);
+		else bad("刷新前没有用户可见提示", toast === null ? "（无 toast）" : toast.textContent);
+	}
+
+	// ── 负向对照：把 ctxReload 改回「模块作用域里引用 t」的旧写法 ──
+	{
+		const brokenEnv = buildBrokenEnv("ctxReload", (text) =>
+			text.replace("function ctxReload(reloadingText) {", "function ctxReload() {")
+				.replace('if (typeof reloadingText === "string" && reloadingText !== "") ctxToast(reloadingText);', 'ctxToast(t("toast.reloading"));'));
+		const broken = buildEnv(brokenEnv);
+		const brokenTree = buildTree(broken);
+		const bs = makeStores();
+		install(broken, { sessions: bs.sessions, workspaces: bs.workspaces, uiWorkspace: bs.uiWorkspace });
+		brokenTree.rootRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
+		const brokenMenu = document.body.querySelector(".dsh-ctx-menu");
+		const brokenItem = brokenMenu === null ? void 0 : brokenMenu.querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("刷新页面"));
+		let brokenThrew = null;
+		if (brokenItem !== void 0 && brokenItem !== null) {
+			try { brokenItem.dispatchEvent(makeEvent("click")); } catch (error) { brokenThrew = error; }
+		}
+		const brokenToast = document.body.querySelector(".dsh-ctx-toast");
+		const brokenMsg = brokenToast === null ? "" : brokenToast.textContent;
+		if (window.__reloaded !== true && (brokenThrew !== null || brokenMsg.includes("t is not defined"))) {
+			ok("负向对照：旧写法（ctxReload 里用 t）确实不刷新并报 t is not defined —— 本条断言有效", brokenMsg || String(brokenThrew && brokenThrew.message));
+		} else bad("负向对照失效：旧写法竟然没被抓住", `reloaded=${window.__reloaded} toast=${brokenMsg || "无"}`);
+	}
+}
+
 section("9. 健壮性：动作抛错不冒泡成未捕获异常");
 {
 	const env = buildEnv();
@@ -1023,7 +1143,10 @@ section("12. 负向对照：把判据改坏，断言必须变红");
 	// 期望：解析器**不要**乱猜，而应退化到第二级 aria-selected → current。
 	{
 		const brokenEnv = buildBrokenEnv("ctxSessionRowId", () => "function ctxSessionRowId() { return null; }");
-		const env = makeSandboxArgs(brokenEnv, setTimeout);
+		// ⚠ 必须走 buildEnv(brokenEnv)：直接 makeSandboxArgs 不重置 document.body，
+		//   querySelector(".dsh-ctx-menu") 会命中**上一节残留**的菜单节点，
+		//   点到旧闭包上 → 断言以假红/假绿收场（实测踩过）。
+		const env = buildEnv(brokenEnv);
 		const tree = buildTree(env);
 		const { sessions } = makeStores();
 		const resolved = env.ctxResolveSession(sessions, tree.sessionRow, null);
@@ -1034,7 +1157,10 @@ section("12. 负向对照：把判据改坏，断言必须变红");
 	// 对照 B：判据坏 + 无 aria-selected + 标题库里查不到 → 必须 null（宁可不管）。
 	{
 		const brokenEnv = buildBrokenEnv("ctxSessionRowId", () => "function ctxSessionRowId() { return null; }");
-		const env = makeSandboxArgs(brokenEnv, setTimeout);
+		// ⚠ 必须走 buildEnv(brokenEnv)：直接 makeSandboxArgs 不重置 document.body，
+		//   querySelector(".dsh-ctx-menu") 会命中**上一节残留**的菜单节点，
+		//   点到旧闭包上 → 断言以假红/假绿收场（实测踩过）。
+		const env = buildEnv(brokenEnv);
 		const tree = buildTree(env);
 		const { sessions } = makeStores();
 		tree.sessionRow.removeAttribute("aria-selected");
@@ -1047,7 +1173,10 @@ section("12. 负向对照：把判据改坏，断言必须变红");
 	// 对照 C：真正要防的误判 —— 标题在库里命中**多个**会话时必须 null。
 	{
 		const brokenEnv = buildBrokenEnv("ctxSessionRowId", () => "function ctxSessionRowId() { return null; }");
-		const env = makeSandboxArgs(brokenEnv, setTimeout);
+		// ⚠ 必须走 buildEnv(brokenEnv)：直接 makeSandboxArgs 不重置 document.body，
+		//   querySelector(".dsh-ctx-menu") 会命中**上一节残留**的菜单节点，
+		//   点到旧闭包上 → 断言以假红/假绿收场（实测踩过）。
+		const env = buildEnv(brokenEnv);
 		const tree = buildTree(env);
 		const { sessions } = makeStores();
 		tree.sessionRow.removeAttribute("aria-selected");
@@ -1096,7 +1225,10 @@ section("13. 设置页开关门控：默认开 / 关掉后一根监听都不挂 
 	else bad("设置页渲染了 ctxMenu.enabled 开关行");
 
 	// 13b 关掉开关时必须走「不安装」分支，而不是安装了再隐藏
-	if (/if \(enabled\) teardown = installContextMenu\(scope, ctxT, uiWorkspace\)/.test(code)) ok("门控：仅在 enabled 时调用 installContextMenu（关掉=不挂监听）");
+	// ⚠ 第三参在 v0.4.15 由 `uiWorkspace` 改成取值器 `readUiWorkspace`：
+	//   服务必须**每动作实时取**，不能在安装时闭包捕获（安装时机可能早于
+	//   服务就绪，捕获到 undefined 会让所有动作静默失效）。
+	if (/if \(enabled\) teardown = installContextMenu\(scope, ctxT, readUiWorkspace\)/.test(code)) ok("门控：仅在 enabled 时调用 installContextMenu（关掉=不挂监听）");
 	else bad("门控：仅在 enabled 时调用 installContextMenu");
 
 	if (/prefs\.subscribe\(sync\)/.test(code)) ok("门控：订阅 prefs，改开关即时生效（无需刷新页面）");
@@ -1205,14 +1337,40 @@ section("14. 服务契约：动作只能调真实存在的官方方法");
 	// 不能各写各的 —— 集中一处才能保证「被吞就 replace 保底」这条逻辑
 	// 覆盖到全部三个调用点。
 	const reloadCount = (code.match(/window\s*\.\s*location\s*\.\s*reload\s*\(\s*\)/g) || []).length;
-	const reloadCallers = (code.match(/run:\s*\(\)\s*=>\s*\{\s*ctxReload\s*\(\s*\)\s*;\s*\}/g) || []).length;
+	// v0.4.15 起调用点长这样：ctxReload(t("toast.reloading")) —— 文案由调用方
+	// 传入（ctxReload 在模块作用域，拿不到 t，见下面的断言）。
+	const reloadCallers = (code.match(/run:\s*\(\)\s*=>\s*\{\s*ctxReload\s*\([^;]*\);/g) || []).length;
 	if (reloadCount === 1) ok("window.location.reload() 全文件只有一处（集中在 ctxReload 里）");
 	else bad("window.location.reload() 出现次数不是 1", `实际 ${reloadCount} 处`);
-	if (reloadCallers === 3) ok("三个「刷新页面」菜单项都走 ctxReload()");
-	else bad("三个「刷新页面」菜单项都走 ctxReload()", `ctxReload() 调用 ${reloadCallers} 次`);
+	if (reloadCallers === 3) ok("三个「刷新页面」菜单项都走 ctxReload(…)");
+	else bad("三个「刷新页面」菜单项都走 ctxReload(…)", `ctxReload 调用 ${reloadCallers} 次`);
 	// 保底路径必须存在
 	if (/location\s*\.\s*replace\s*\(\s*window\s*\.\s*location\s*\.\s*href\s*\)/.test(code)) ok("ctxReload 里有 location.replace(href) 保底（防 reload 被吞）");
 	else bad("ctxReload 缺少 location.replace 保底");
+
+	// 【v0.4.15 回归】ctxReload 是**模块作用域**函数，拿不到 installContextMenu
+	// 的形参 t。真机实证：旧写法 ctxToast(t("toast.reloading")) 抛
+	// "t is not defined"，点「刷新页面」只弹一条报错、页面根本不刷新。
+	// 必须比对「剥注释后」的源码：修复说明里就写着这行旧代码，否则会自判红。
+	const reloadFn = stripComments(extractFunction("ctxReload") || "");
+	if (/\bt\s*\(/.test(reloadFn)) bad("ctxReload 引用了翻译函数 t（模块作用域取不到 → t is not defined，刷新页面失效）");
+	else ok("ctxReload 不引用翻译函数 t（文案由调用方传入）");
+	if (/ctxReload\s*\(\s*t\s*\(\s*"toast\.reloading"\s*\)\s*\)/.test(code)) ok("「刷新页面」菜单项把 t(\"toast.reloading\") 传给了 ctxReload");
+	else bad("「刷新页面」菜单项没有把刷新提示文案传给 ctxReload");
+
+	// 【v0.4.15 回归】window 上的 blur 监听**不许带 capture**：
+	// blur 不冒泡但有捕获阶段，capture:true 会让 window 收到**元素级** blur ——
+	// 鼠标按下菜单项时焦点移走即触发，菜单被删，click 永不派发，
+	// 所有菜单项（复制工作区路径 / 刷新页面 / 新建会话…）一起静默失效。
+	if (/window\s*\.\s*addEventListener\s*\(\s*"blur"[^)]*,\s*true\s*\)/.test(code)) bad("window 的 blur 监听带了 capture:true（会收到元素级 blur，全部菜单项失效）");
+	else ok("window 的 blur 监听没有 capture（不接受元素级 blur）");
+	// 负向对照：上面那条正则对旧写法必须响
+	if (/window\s*\.\s*addEventListener\s*\(\s*"blur"[^)]*,\s*true\s*\)/.test('window.addEventListener("blur", onViewportChange, true);')) ok("负向对照：capture:true 的旧写法会被上面那条判红");
+	else bad("负向对照失效：capture:true 的旧写法没被捕获");
+	if (/window\s*\.\s*addEventListener\s*\(\s*"blur"\s*,\s*onWindowBlur\s*\)/.test(code)) ok("blur 监听绑定到 onWindowBlur（内含 target===window 守卫）");
+	else bad("blur 监听没有绑定 onWindowBlur（缺少 target===window 守卫）");
+	if (/removeEventListener\s*\(\s*"blur"\s*,\s*onWindowBlur\s*\)/.test(code)) ok("拆卸时对称移除 onWindowBlur（不留监听）");
+	else bad("拆卸时没有移除 onWindowBlur（补丁摘不干净）");
 
 	// 复制工作区路径：菜单项**必须始终存在**，不能因 path 为空就静默省略
 	// —— 那正是 v0.4.13 首发用户报「点了没反应」的形态。
@@ -1230,10 +1388,19 @@ section("14. 服务契约：动作只能调真实存在的官方方法");
 	// workspaces.startSession 后，若测试台仍给 workspaces 补上该方法的假实现，
 	// 断言就会放过 —— 所以这里**故意补上假实现**，验证测试台的守护确实
 	// 依赖「假服务忠实还原真契约」，而不是依赖运气。
+	//
+	// ⚠ v0.4.15 起源码不再直接写 `uiWorkspace.startSession(...)`，而是先经
+	//   `const uws = readUiWorkspace();` 实时取值再调 `uws.startSession(...)`
+	//   （见 installContextMenu 顶部注释：服务不能闭包捕获）。
+	//   因此改写目标必须同时覆盖**两种**写法，否则这条对照会静默变成空操作、
+	//   以 `started=0` 假红 —— 那不是「对照生效」，而是「对照没打中」。
 	{
 		const brokenEnv = buildBrokenEnv("installContextMenu", (text) =>
-			text.replace(/uiWorkspace\s*\.\s*startSession\s*\(/g, "workspaces.startSession("));
-		const env = makeSandboxArgs(brokenEnv, setTimeout);
+			text.replace(/\b(?:uiWorkspace|uws)\s*\.\s*startSession\s*\(/g, "workspaces.startSession("));
+		// ⚠ 必须走 buildEnv(brokenEnv)：直接 makeSandboxArgs 不重置 document.body，
+		//   querySelector(".dsh-ctx-menu") 会命中**上一节残留**的菜单节点，
+		//   点到旧闭包上 → 断言以假红/假绿收场（实测踩过）。
+		const env = buildEnv(brokenEnv);
 		const tree = buildTree(env);
 		const stores = makeStores();
 		// 假服务比真机宽松：真机 workspaces 上没有 startSession
@@ -1246,7 +1413,10 @@ section("14. 服务契约：动作只能调真实存在的官方方法");
 		// 若「假服务宽松就能骗过测试台」，说明 §14 的价值全在静态方法表那两条上；
 		// 这条对照把这件事**显式记录**下来。
 		if (stores.calls.started.length === 1) ok("负向对照 A：假服务补上 workspaces.startSession 时确能骗过运行时断言（故静态方法表是本段的真正防线）");
-		else bad("负向对照 A 未按预期执行", `started=${stores.calls.started.length}`);
+		else {
+			const toast = document.body.querySelector(".dsh-ctx-toast");
+			bad("负向对照 A 未按预期执行", `started=${stores.calls.started.length} item=${item === void 0 ? "未找到" : "找到"} toast=${toast === null ? "无" : toast.textContent}`);
+		}
 	}
 
 	// ── 运行时负向对照 B：删掉 uiWorkspace 后动作必须整体失效 ──

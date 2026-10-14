@@ -207,7 +207,17 @@ node tools/live-smoke.mjs <URL+token>   # 真机冒烟（可选；自动探测�
 
 ## 变更记录
 
-- **v0.4.14（本次）**：修掉功能六首发后暴露的两类真实缺陷（详见下条 v0.4.13 的「首发后修复」）。
+- **v0.4.15（本次）**：修掉**功能六（右键菜单）两个互相独立的真实缺陷** —— 用户实测「右键工作区 → 复制工作区路径」与「刷新页面」两项都没反应（两条抱怨其实是两个不同的 bug，第 ① 条还会让**所有**菜单项一起失效）。
+  - **① 所有菜单项都点不动**：视口监听写成 `window.addEventListener("blur", onViewportChange, true)`。`blur` 不冒泡，但**有捕获阶段**，挂在 `window` 上的**捕获**监听因此会收到**元素级**失焦：按下鼠标时焦点从菜单第一项（菜单打开时 `first.focus()` 留在它身上）移到被点的那一项，前一项触发 `blur` → `closeCtxMenu()` 把菜单节点从 `body` 摘掉 → 紧接着的 `pointerup` / `mouseup` 落到菜单**背后**的列表行上 → **`click` 永远不会派发**。真机 HUD 轨迹是铁证：`C:pointerdown>span IN_MENU ON_ITEM` → `C:mousedown>span` → `C:pointerup>div.hIlkoa_projectRow[rk=workspace:…]` → `MENU_CLOSED`，**全程没有 `C:click`**；同一机制也解释了方向键导航「一按菜单就消失」（`next.focus()` 引发前一项 `blur`）。
+    - **修法**：只监听**窗口自身**失焦 —— `const onWindowBlur = (event) => { if (event.target !== window) return; closeCtxMenu(); };` + `window.addEventListener("blur", onWindowBlur)`（**不加** capture）；`resize` 仍保留捕获监听，拆卸段对称 `removeEventListener("blur", onWindowBlur)`。
+  - **② 刷新页面只弹一条 `t is not defined`、页面纹丝不动**：`ctxReload()` 位于**模块作用域**，函数体第一行 `ctxToast(t("toast.reloading"))` 却引用了 `installContextMenu(scope, t, uiWorkspace)` 的**形参** `t` —— 那个作用域里根本没有 `t`，`ReferenceError` 又在 `try` **之外**抛出，于是 `window.location.reload()` 与 150ms 的 `location.replace` 兜底**一次都没跑到**，只剩菜单项 `catch` 弹出的那条报错（真机截图里的 toast 文案就是 `t is not defined`）。
+    - **修法**：`ctxReload(reloadingText)` 改为收参数，三个调用点（选中文本 / 工作区行 / 会话行）统一传 `ctxReload(t("toast.reloading"))`。
+  - **断言（`tools/check-context-menu.mjs` 94 → 109 条）**：新增 §8b（**元素级** `blur` 不许关菜单、窗口自身失焦仍要关；负向对照：改回带 capture 的写法必须变红）与 §8c（点「刷新页面」不抛异常、`window.__reloaded === true`、toast 含「刷新」；负向对照：`ctxReload` 改回引用 `t` 必须复现 `t is not defined` 且不刷新）；§14 新增静态断言「`ctxReload` 剥注释后不得出现 `t(`」「三处调用点必须传 `t("toast.reloading")`」「`window` 的 `blur` 监听不得带 capture」。顺带修掉测试台**一个从未被发现**的自身缺陷：4 处负向对照沿用上一节的 DOM，`querySelector(".dsh-ctx-menu")` 命中残留的旧菜单节点（点到旧闭包），负向对照因此恒以「没弹菜单」假红 —— 改为每节重建 DOM 后才真正生效。
+  - **负向对照实测（本轮真跑，不是推断）**：基线 **109/109**；把 `blur` 监听改回带 capture 的旧写法 → **106/109**；把 `ctxReload` 改回引用 `t` → **106/109**；把三个调用点改回无参 `ctxReload()` → **107/109**。三组全部真红，改完即还原（文件 SHA256 与部署版一致）。
+  - **真机验收（真实鼠标输入，非消息注入）**：`复制工作区路径` → 剪贴板由哨兵值变为该工作区真实路径（`D:\888yhxy`）；`刷新页面` → 抓到底部「HARNESS / Loading plugins…」启动画面、约 1.4s 后窗口标题恢复为会话名、无错误对话框、宿主 boot 标识不变。`npm run check` 退出码 0：钩子钉 7/7 + 座位钉 28/28 + **右键钉 109/109** + 漂移钉 4/4 + compat-check 101/101 + live-smoke SKIP。
+  - **⚠ 真机踩坑（热更新 vs 整页 reload）**：把 `profiles/desktop` 里的实装 `client.js` **就地改掉**之后，靠 DSH 对插件 bundle 的**热更新**（约 10s 自动重跑新代码、不必刷新页面）验证是安全的；但此时若再触发**整页 reload**，shell 的 boot 审计会报 `dsh-ui-tools: import failed (see console for the import error)` 并弹出「应用无法启动」原生对话框（`logs/crash-*-web-boot.log` 只有摘要行、没有底层异常栈），而**冷启动同一份文件完全正常** —— 怀疑是宿主进程启动时算出的插件 rev 与磁盘现文件不一致。结论：改完实装文件后，要么只靠热更新验证，要么连宿主一起重启，别在改完实装文件的当下立刻整页 reload。
+  - `package.json` 版本 `0.4.14 → 0.4.15`。只改 `lib/client.js`、`tools/check-context-menu.mjs` 与文档（客户端 bundle，**无构建步骤**），刷新页面或等热更新即生效。
+- **v0.4.14（历史）**：修掉功能六首发后暴露的两类真实缺陷（详见下条 v0.4.13 的「首发后修复」）。
 - **v0.4.13（历史）**：新增**功能六「会话 / 工作区列表右键菜单」**——插件由五功能变为六功能。
   - **来源**：用户要求「加个右键功能」，参考社区插件 `@baihejiangnan/dsh-session-context-menu`。**只借鉴能力面与那条 `data-row-key` 判据经验，代码完全自写**：不 `import` / 不 `require` / 不引用对方包名与全局注册表（`dsh.session-context-menu.extensions`）、不依赖对方自定义事件（`dsh:session-context-menu`）——四条都由断言钉死，防止以后手滑把参考插件变成硬依赖。
   - **菜单内容**：会话行 6 项（重命名 / 归档会话 / 创建会话分支 / 复制会话 ID / 复制工作目录 / 刷新页面）；工作区行 4 项（新建会话 / 复制工作区路径 / 归档工作区全部会话 / 刷新页面）；选中文本时 2 项（复制所选文本 / 发送所选文本到输入框）。
