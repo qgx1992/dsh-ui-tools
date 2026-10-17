@@ -679,32 +679,156 @@ section("6. 弹出列表底色（v0.4.13：完全不透明实底，不许再有�
 	}
 
 	// ②c v0.4.16：深色主题必须有一套不透明实底，否则深夜主题下是一块亮白浮层
-	const darkBgRules = rules.filter((r) => r.selectors.some((s) => s.includes("data-ds-dark-theme") && s.includes("[data-mss-panel]")));
+	// v0.4.18 修正本条的**判据范围**：旧版把「所有带 data-ds-dark-theme 且含
+	// [data-mss-panel] 的规则」一股脑收进来，于是 .mss-row:hover / 选中态那些
+	// **半透明交互底**也被当成「面板底色」判红（它们本来就该是半透明的）。
+	// 面板底色只认「选择器最后一级就是 [data-mss-panel]」的规则。
+	const isPanelBase = (s) => {
+		const last = s.split(">").pop().trim().split(/\s+/).pop();
+		return last === "[data-mss-panel]";
+	};
+	const darkBgRules = rules.filter((r) => r.selectors.some((s) => s.includes("data-ds-dark-theme") && isPanelBase(s)));
 	const darkBg = darkBgRules.map((r) => norm(r.decls["background"])).filter(Boolean);
 	const darkBad = darkBg.filter((v) => v.includes("transparent") || /rgba\([^)]*,\s*0?\.\d+\s*\)/.test(v) || v.includes("specific-menu"));
 	if (darkBg.length > 0 && darkBad.length === 0) ok("深色主题面板底色是不透明实底（无半透明 / 无菜单 token 引用）", darkBg.map((v) => JSON.stringify(v)).join(" , "));
 	else bad("深色主题面板底色是不透明实底（无半透明 / 无菜单 token 引用）", darkBg.length === 0 ? "找不到带 data-ds-dark-theme 的 [data-mss-panel] 规则" : darkBad.join(" , "));
 
-	// ②d 深色实底必须同时换浅色文字，否则深底 + 近黑字看不清
+	// ②d v0.4.18：深色实底必须同时换浅色文字，否则深底 + 近黑字看不清。
+	// 旧版钉的是「必须写 var(--dsw-alias-label-primary-foreground)」——那个 token
+	// 与面板实底分属两套体系，正是 v0.4.18 判定为不可靠而弃用的东西（见
+	// 下面 ④ 的注释）。现在改为按**实际解析出的颜色**判定：必须是近白且够亮。
+	const lum = (hex) => {
+		const m = /^#([0-9a-f]{6})$/i.exec(hex || "");
+		if (!m) return null;
+		const n = parseInt(m[1], 16);
+		const ch = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map((v) => {
+			const c = v / 255;
+			return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+		});
+		return 0.2126 * ch[0] + 0.7152 * ch[1] + 0.0722 * ch[2];
+	};
 	const darkText = darkBgRules.map((r) => norm(r.decls["color"])).filter(Boolean);
-	if (darkText.some((v) => v.includes("label-primary-foreground"))) ok("深色主题面板文字改取 label-primary-foreground（深底配浅字）");
-	else bad("深色主题面板文字改取 label-primary-foreground（深底配浅字）", darkText.join(" , ") || "深色规则里没有 color");
+	const darkTextLum = darkText.map(lum);
+	if (darkText.length > 0 && darkTextLum.every((v) => v !== null && v >= 0.6)) {
+		ok("深色主题面板文字为近白字面值（深底配浅字，换算相对亮度 ≥ 0.6）", darkText.join(" , "));
+	} else {
+		bad("深色主题面板文字为近白字面值（深底配浅字，换算相对亮度 ≥ 0.6）", darkText.length === 0 ? "深色规则里没有 color" : darkText.join(" , "));
+	}
 
 	// ③ 分层不能一起删掉：描边 / 圆角 / 投影必须还在，否则实底菜单会「贴」在输入框上
 	const keep = ["border", "border-radius", "box-shadow"].filter((k) => panelDecls[k] !== void 0);
 	if (keep.length === 3) ok("实底化后仍保留描边 / 圆角 / 投影（浮层与 composer 仍有分层）");
 	else bad("实底化后仍保留描边 / 圆角 / 投影（浮层与 composer 仍有分层）", `缺少：${["border", "border-radius", "box-shadow"].filter((k) => panelDecls[k] === void 0).join(", ")}`);
 
-	// ④ 面板文字必须仍是主题深色（近黑），不能跟着主按钮变白——深色字配浅色实底
+	// ④ v0.4.18：面板文字必须与面板实底形成足够对比 —— 判据从「必须写某个 token」
+	// 改成「按实际解析出的颜色算 WCAG 对比度」。
+	// 为什么不再钉 --dsw-alias-label-primary：查内核主题源码（ui-theme/lib/client.js）
+	// 得 label-primary 浅色 = bluish-1000（#0f1115）、深色 = bluish-50（#f9fafb），
+	// 它跟随**内核表面**；而本插件面板底色是自己写死的 #f8f9fa / #2c2c2e。
+	// 两套体系一旦不同步就会出现「token 存在、但配在这块实底上难看」的情况
+	// （v0.4.18 修的正是这个：子元素 token 指向 label-tertiary #81858c / caption
+	// #81858c，落在实底上只有 3.2~3.3:1）。所以现在钉的是**能验证的事实**：
+	// 面板根规则里 color 必须是可解析的字面色，且对 panelBackground 达 4.5:1。
+	const contrast = (fg, bg) => {
+		const a = lum(fg);
+		const b = lum(bg);
+		if (a === null || b === null) return null;
+		const hi = Math.max(a, b);
+		const lo = Math.min(a, b);
+		return (hi + 0.05) / (lo + 0.05);
+	};
 	const pc = norm(panelDecls["color"]);
-	const isWhiteish = pc === "#fff" || pc === "#ffffff" || pc === "white";
-	if (pc && pc.includes("label-primary") && !isWhiteish) ok("面板文字仍是 --dsw-alias-label-primary（未跟着按钮变白）", `${JSON.stringify(panelDecls["color"])}`);
-	else bad("面板文字仍是 --dsw-alias-label-primary（未跟着按钮变白）", pc ? `实得 ${JSON.stringify(panelDecls["color"])}` : "找不到 color");
+	const pbg = norm(panelDecls["background"]);
+	const ratio = contrast(pc, pbg);
+	if (ratio !== null && ratio >= 4.5) ok("面板文字与面板实底的对比度 ≥ 4.5:1（字面色，不依赖内核 token）", `${pc} on ${pbg} = ${ratio.toFixed(2)}:1`);
+	else bad("面板文字与面板实底的对比度 ≥ 4.5:1（字面色，不依赖内核 token）", `${JSON.stringify(panelDecls["color"])} on ${JSON.stringify(panelDecls["background"])} = ${ratio === null ? "无法计算（不是 #rrggbb 字面色）" : ratio.toFixed(2) + ":1"}`);
 
 	// ⑤ 反向：面板自己不许挂 backdrop-filter 的「-webkit-」残留，也不许有第二个面板规则互相打架
 	const panelRules = rules.filter((r) => r.selectors.some((s) => s.trim() === "[data-mss-panel]"));
 	if (panelRules.length === 1) ok("[data-mss-panel] 基础规则唯一（没有第二条在覆盖底色）", `${panelRules.length} 条`);
 	else bad("[data-mss-panel] 基础规则唯一（没有第二条在覆盖底色）", `实得 ${panelRules.length} 条`);
+
+	/* ── 6.1 面板内全部文字层 / 交互底的分层自适应（v0.4.18 新增） ──
+	   v0.4.18 的病因是「面板实底写死、子元素颜色跟内核 token 走」，两类体系一不同步
+	   就翻车。这条断言把「同步」变成可验证的硬约束，覆盖四个文字层 + 三个交互底：
+	     文字层：面板根 / .mss-group-title / .mss-desc / .mss-empty+.mss-loading
+	     交互底：.mss-row:hover / [aria-checked="true"] / 选中+hover
+	   文字层阈值按 WCAG AA 分档：≥12px 取 4.5:1，11px 小字也按 4.5:1（不做 3:1 放宽，
+	   因为这些是列表辅助信息，看错就是选错）。 */
+	section("6.1 面板内各文字层与交互底（v0.4.18：深浅两套全部字面值，按对比度验证）");
+	const pickColor = (needle) => {
+		const lightRule = rules.find((r) => r.selectors.some((s) => s === `[data-mss-panel] ${needle}` && !s.includes("data-ds-dark-theme")));
+		const darkRule = rules.find((r) => r.selectors.some((s) => s.includes("data-ds-dark-theme") && s.endsWith(`[data-mss-panel] ${needle}`)));
+		return { light: lightRule ? norm(lightRule.decls["color"]) : null, dark: darkRule ? norm(darkRule.decls["color"]) : null };
+	};
+	const lightBase = "rgb(248,249,250)";
+	const darkBase = "rgb(44,44,46)";
+	const lumOf = (v) => {
+		if (!/^#[0-9a-f]{6}$/i.test(v || "")) return null;
+		return lum(v);
+	};
+	const cr = (fgHex, bgHex) => {
+		const a = lumOf(fgHex);
+		const b = lumOf(bgHex);
+		if (a === null || b === null) return null;
+		return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+	};
+	for (const [label, needle] of [
+		["分组标题 .mss-group-title", ".mss-group-title"],
+		["选项描述 .mss-desc", ".mss-row .mss-desc"],
+	]) {
+		const c = pickColor(needle);
+		const rl = cr(c.light, "#f8f9fa");
+		const rd = cr(c.dark, "#2c2c2e");
+		if (rl !== null && rd !== null && rl >= 4.5 && rd >= 4.5) {
+			ok(`${label} 深浅两套字面色对各自实底 ≥ 4.5:1（不再走 label-caption/tertiary）`, `浅 ${c.light}=${rl.toFixed(2)}:1 / 深 ${c.dark}=${rd.toFixed(2)}:1`);
+		} else {
+			bad(`${label} 深浅两套字面色对各自实底 ≥ 4.5:1（不再走 label-caption/tertiary）`, `浅 ${JSON.stringify(c.light)}=${rl === null ? "n/a" : rl.toFixed(2)}:1 / 深 ${JSON.stringify(c.dark)}=${rd === null ? "n/a" : rd.toFixed(2)}:1`);
+		}
+	}
+	// 空态/加载态：两条选择器合并写在一条规则里，取第一条命中即可
+	const emptyLight = rules.find((r) => r.selectors.includes("[data-mss-panel] .mss-empty") && !r.selectors.some((s) => s.includes("dark")));
+	const emptyDark = rules.find((r) => r.selectors.some((s) => s.includes("data-ds-dark-theme") && s.endsWith("[data-mss-panel] .mss-empty")));
+	{
+		const rl = cr(emptyLight ? norm(emptyLight.decls["color"]) : null, "#f8f9fa");
+		const rd = cr(emptyDark ? norm(emptyDark.decls["color"]) : null, "#2c2c2e");
+		if (rl !== null && rd !== null && rl >= 4.5 && rd >= 4.5) ok("空态/加载态文字深浅两套 ≥ 4.5:1", `浅 ${rl.toFixed(2)}:1 / 深 ${rd.toFixed(2)}:1`);
+		else bad("空态/加载态文字深浅两套 ≥ 4.5:1", `浅 ${rl === null ? "n/a" : rl.toFixed(2)}:1 / 深 ${rd === null ? "n/a" : rd.toFixed(2)}:1`);
+	}
+	// 选中底：浅色面板上必须真的看得见（旧版 color-mix + 近黑品牌色 → 几乎不可见）
+	{
+		const selLight = rules.find((r) => r.selectors.includes('[data-mss-panel] .mss-row[aria-checked="true"]'));
+		const selDark = rules.find((r) => r.selectors.some((s) => s.includes("data-ds-dark-theme") && s.endsWith('[data-mss-panel] .mss-row[aria-checked="true"]')));
+		const vis = (decl) => {
+			const m = /rgba\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*(0?\.\d+|1)\s*\)/.exec(decl || "");
+			return m ? parseFloat(m[1]) : 0;
+		};
+		const vl = vis(selLight && selLight.decls["background"]);
+		const vd = vis(selDark && selDark.decls["background"]);
+		if (vl >= 0.1 && vd >= 0.15) ok("选中态底色深浅两套都是可见的半透明字面色（不再依赖近黑品牌色）", `浅 alpha ${vl} / 深 alpha ${vd}`);
+		else bad("选中态底色深浅两套都是可见的半透明字面色（不再依赖近黑品牌色）", `浅 alpha ${vl} / 深 alpha ${vd}`);
+	}
+	// 勾选色：深色面板上旧版 brand-text 解析成近黑 = 隐形
+	{
+		const ckLight = rules.find((r) => r.selectors.includes("[data-mss-panel] .mss-row .mss-check"));
+		const ckDark = rules.find((r) => r.selectors.some((s) => s.includes("data-ds-dark-theme") && s.endsWith("[data-mss-panel] .mss-row .mss-check")));
+		const rl = cr(ckLight ? norm(ckLight.decls["color"]) : null, "#f8f9fa");
+		const rd = cr(ckDark ? norm(ckDark.decls["color"]) : null, "#2c2c2e");
+		if (rl !== null && rd !== null && rl >= 3 && rd >= 3) ok("勾选色深浅两套都清晰可见（≥3:1，不再被近黑 token 吞掉）", `浅 ${rl.toFixed(2)}:1 / 深 ${rd.toFixed(2)}:1`);
+		else bad("勾选色深浅两套都清晰可见（≥3:1，不再被近黑 token 吞掉）", `浅 ${rl === null ? "n/a" : rl.toFixed(2)}:1 / 深 ${rd === null ? "n/a" : rd.toFixed(2)}:1`);
+	}
+	// 兜底：面板范围内不许再出现任何 label-* / brand-* 内核 token
+	{
+		const cssPanel = rules.filter((r) => r.selectors.some((s) => s.includes("[data-mss-panel]")));
+		const offenders = [];
+		for (const r of cssPanel) {
+			for (const [k, v] of Object.entries(r.decls)) {
+				if (/var\(\s*--dsw-alias-(label-|brand-|interactive-bg)/.test(v)) offenders.push(`${r.selectors[0]} { ${k}: ${v} }`);
+			}
+		}
+		if (offenders.length === 0) ok("面板内不再引用任何内核文字/品牌/交互 token（配色自洽）");
+		else bad("面板内不再引用任何内核文字/品牌/交互 token（配色自洽）", offenders.slice(0, 4).join(" | "));
+	}
 }
 
 console.log(`\n合计 ${pass}/${pass + fail} 通过`);

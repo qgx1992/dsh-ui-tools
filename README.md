@@ -207,7 +207,14 @@ node tools/live-smoke.mjs <URL+token>   # 真机冒烟（可选；自动探测�
 
 ## 变更记录
 
-- **v0.4.17（本次）**：只动**断言工具**，插件运行时（`lib/client.js` / `lib/index.js`）一行未改。
+- **v0.4.18（本次）**：修掉功能一弹出列表的「**文字不自适应**」（用户实测：按钮弹窗的列表文字发灰、选中项看不清）。
+  - **问题**：v0.4.16 只把**面板根节点**的文字换成了字面值，而面板里的子元素仍在引用内核 token：`.mss-group-title` / `.mss-empty` / `.mss-loading` 用 `--dsw-alias-label-tertiary`，`.mss-row .mss-desc` 用 `--dsw-alias-label-caption`。查内核主题源码（`@deepseek-ai/dsh-client-ui-theme/lib/client.js`）得两组 token 的两套取值：`label-tertiary` 浅色 `#81858c` / 深色 `#adb2b8`，`label-caption` 浅色 `#adb2b8` / 深色 `#81858c`。而本插件面板实底是**自己写死的** `#f8f9fa` / `#2c2c2e`，两套体系一不同步就翻车：浅色面板 `#f8f9fa` 配 `#81858c` 只有约 3.3:1，11px 小字直接发灰；深色面板 `#2c2c2e` 配 caption `#81858c` 约 3.2:1。同一根因还带出三个隐性可见问题：选中底用 `color-mix(in srgb, var(--dsw-alias-brand-primary) 12%)`，而本机 `brand-primary` 解析成**近黑**（bluish-1000），浅色面板上那层选中底几乎看不见；勾选色用 `--dsw-alias-brand-text`（本机同样近黑），在深色面板上等于隐形；hover 底用 `--dsw-alias-interactive-bg-hover`（浅色 `#2631480f`），是给内核表面调的，落在本插件实底上偏薄。
+  - **改法**：把面板内**每一个文字层**（面板根 / 分组标题 / 选项描述 / 空态+加载态）与**三种交互底**（hover / 选中 / 选中+hover）以及勾选色全部改成**字面值、深浅各一套**，用 `[data-ds-dark-theme]` 属性选择器切档（比 `light-dark()` 兼容性稳，DSH 桌面端不保证 Chrome 123+）。取色都按对各自实底的 WCAG 对比度反推：分组标题 `#5f6469` 浅 5.67:1 / `#b9bec6` 深 7.46:1，描述 `#6a7079` 浅 4.74:1 / `#a7adb6` 深 6.17:1，勾选 `#4176e6` 浅 4.02:1 / `#6a9bff` 深 5.14:1，选中底浅 `rgba(65,118,230,.12)` / 深 `rgba(90,140,250,.22)`。由此**面板配色完全自洽**，不再与内核任何一次主题改动产生牵动。
+  - **为什么不用 `var(--x, fallback)` 兜底**：兜底只在 token 缺席时生效，而本机 token 恰恰是「存在但取值不适合这套实底」，兜底永远轮不到。
+  - **断言（`tools/check-model-seat-hug.mjs` 32 → 38 条）**：新增 §6.1 六条按**实际解析出的颜色算 WCAG 对比度**的断言——分组标题/选项描述/空态浅深各 ≥ 4.5:1、选中底深浅 alpha 必须可见、勾选色 ≥ 3:1、**面板范围内不许再出现任何 `label-*` / `brand-*` / `interactive-bg` 内核 token**（负向兜底：想改回引 token 立刻变红）。同时把两条旧断言从「必须写某个 token」改成按实际颜色判定（深色面板文字按相对亮度 ≥ 0.6、面板根文字对实底 ≥ 4.5:1），并修正了旧版把**半透明交互底**误当成「面板底色」判红的取样范围 bug（只认选择器最后一级就是 `[data-mss-panel]` 的规则）。
+  - **需要刷新页面**：本次改了 `lib/client.js` 的 CSS，属于客户端 bundle 变更。
+
+- **v0.4.17（历史）**：只动**断言工具**，插件运行时（`lib/client.js` / `lib/index.js`）一行未改。
   - **问题**：`tools/compat-check.mjs` 的「未知依赖模块兜底桩」写成 `new Proxy({}, { get: () => () => ({}) })` —— 任何属性都返回一个普通函数。内核 bundle 里有 `class X extends SomeBase` 这类写法，而普通函数不可当基类，于是抛 `Class extends value () => ({}) is not a constructor`；该异常又被外层的 `catch` 静默吞掉，整段 B3 判为空，最终对外表现成「本机找不到内核副本，本节跳过」。**这是断言工具自己的假绿，不是内核缺失**。
   - **改法**：换成「可调用 + 可构造 + 任意属性返回自身」的 Proxy 兜底（`apply` 返回自身、`construct` 返回空对象、`prototype` 返回空对象、`then`/`toJSON`/`Symbol.toPrimitive` 返回 `undefined` 以免被当成 thenable），并补齐 `react-dom` 与 `useLayoutEffect` / `useReducer` / `useTransition` / `useDeferredValue` / `useId` / `useDebugValue` / `createContext().Provider` 等形状。
   - **效果**：断言数 86/87（B3 整组被吞）→ **91/91**，五个真内核断言全部真跑：流式增量后节点物化为 visible、`settleAssistant` 收尾不抛 withdrew、收尾后节点转 hidden、多回合连续会话全程无异常、每回合都重新物化出可见读数。

@@ -57,17 +57,33 @@
     border-radius: 12px; box-shadow: var(--dsw-shadow-lv3); padding: 4px;
     color: var(--dsw-alias-label-primary);
   }
-  [data-mss-panel] .mss-group-title { color: var(--dsw-alias-label-tertiary); font-size: 11px; line-height: 18px; padding: 5px 8px 2px; }
-  [data-mss-panel] .mss-row {
-    display: flex; justify-content: space-between; align-items: center; gap: 10px;
-    width: 100%; padding: 6px 8px; border: none; border-radius: 8px;
-    background: none; color: inherit; font: inherit; font-size: 13px; line-height: 20px;
-    text-align: left; cursor: pointer; transition: background .16s;
-  }
-  [data-mss-panel] .mss-row:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover); }
-  [data-mss-panel] .mss-row[aria-checked="true"] { background: color-mix(in srgb, var(--mss-accent, #4176e6) 12%, transparent); }
-  [data-mss-panel] .mss-row .mss-check { color: var(--mss-accent-text, #4176e6); flex: none; font-size: 14px; }
-  [data-mss-panel] .mss-row .mss-desc { display: block; color: var(--dsw-alias-label-caption); font-size: 11px; line-height: 16px; }
+  /* v0.4.18：面板内每个文字层与交互底全部改成字面值（深浅两套），不再引用内核
+     label-* / brand-* / interactive-bg token —— 那些 token 跟随内核表面，与本插件
+     写死的实底 #f8f9fa / #2c2c2e 是两套体系，不同步就会发灰或隐形。 */
+  [data-mss-panel] .mss-group-title { color: #5f6469; font-size: 11px; line-height: 18px; padding: 5px 8px 2px; }
+  [data-mss-panel] .mss-row:hover:not(:disabled) { background: rgba(0, 0, 0, .06); }
+  [data-mss-panel] .mss-row[aria-checked="true"] { background: rgba(65, 118, 230, .12); }
+  [data-mss-panel] .mss-row[aria-checked="true"]:hover:not(:disabled) { background: rgba(65, 118, 230, .18); }
+  [data-mss-panel] .mss-row .mss-check { color: #4176e6; flex: none; font-size: 14px; }
+  [data-mss-panel] .mss-row .mss-desc { display: block; color: #6a7079; font-size: 11px; line-height: 16px; }
+  [data-mss-panel] .mss-empty, [data-mss-panel] .mss-loading { padding: 10px 8px; color: #5f6469; font-size: 12px; line-height: 18px; }
+  html[data-ds-dark-theme] [data-mss-panel], [data-ds-dark-theme] [data-mss-panel] { background: #2c2c2e; color: #f9fafb; }
+  html[data-ds-dark-theme] [data-mss-panel] .mss-group-title,
+  [data-ds-dark-theme] [data-mss-panel] .mss-group-title { color: #b9bec6; }
+  html[data-ds-dark-theme] [data-mss-panel] .mss-row:hover:not(:disabled),
+  [data-ds-dark-theme] [data-mss-panel] .mss-row:hover:not(:disabled) { background: rgba(255, 255, 255, .08); }
+  html[data-ds-dark-theme] [data-mss-panel] .mss-row[aria-checked="true"],
+  [data-ds-dark-theme] [data-mss-panel] .mss-row[aria-checked="true"] { background: rgba(90, 140, 250, .22); }
+  html[data-ds-dark-theme] [data-mss-panel] .mss-row[aria-checked="true"]:hover:not(:disabled),
+  [data-ds-dark-theme] [data-mss-panel] .mss-row[aria-checked="true"]:hover:not(:disabled) { background: rgba(90, 140, 250, .28); }
+  html[data-ds-dark-theme] [data-mss-panel] .mss-row .mss-check,
+  [data-ds-dark-theme] [data-mss-panel] .mss-row .mss-check { color: #6a9bff; }
+  html[data-ds-dark-theme] [data-mss-panel] .mss-row .mss-desc,
+  [data-ds-dark-theme] [data-mss-panel] .mss-row .mss-desc { color: #a7adb6; }
+  html[data-ds-dark-theme] [data-mss-panel] .mss-empty,
+  html[data-ds-dark-theme] [data-mss-panel] .mss-loading,
+  [data-ds-dark-theme] [data-mss-panel] .mss-empty,
+  [data-ds-dark-theme] [data-mss-panel] .mss-loading { color: #b9bec6; }
   [data-mss-panel] .mss-effort-section { margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--dsw-alias-border-l2, rgba(0,0,0,.08)); }
 </style>
 </head>
