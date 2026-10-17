@@ -207,7 +207,17 @@ node tools/live-smoke.mjs <URL+token>   # 真机冒烟（可选；自动探测�
 
 ## 变更记录
 
-- **v0.4.18（本次）**：修掉功能一弹出列表的「**文字不自适应**」（用户实测：按钮弹窗的列表文字发灰、选中项看不清）。
+- **v0.4.19（本次）**：把「取不到认证就会静默失败」的真机冒烟链路修通，并补一处浅色主题下的**白底白字**隐患。
+  - **`tools/live-smoke.mjs` 之前根本跑不起来（三处独立缺陷）**：
+    1. **缺会话 cookie 就 401**：桌面端 Host 的 `BrowserAuth` 只接受 `/?token=<launchToken>`，而 launchToken 是 `BrowserSession` 构造时 `randomBytes` 生成的**进程内**值（存在 `WeakMap` 里，不落盘、不进命令行），401 文案只有一句 `dsh web authentication required; reopen the URL printed by dsh web.`。旧脚本拿裸 URL 直接 `goto`，页面 401 → 插件一个都没加载 → `style 标签在位`/`双按钮座位`/`设置页` 三类断言全红。**修法**：新增 `DSH_SMOKE_COOKIE` 环境变量，脚本把 `dsh-auth-<hash>=v1.<body>.<sig>` 注入 puppeteer 的 cookie jar 后再导航。cookie 可由 `.dsh/.credentials.yaml` 里 `client-connection/browser-session.secret`（32 字节 HMAC 密钥）自签：`name = dsh-auth- + base64url(sha256(authority))`，`body = base64url({version:1,authority,issuedAt,expiresAt})`，`sig = base64url(HMAC-SHA256(secret, body))`，`authority` 就是 `Host` 头（如 `127.0.0.1:51519`）。已实测可用（`GET /` 返回 200）。
+    2. **`puppeteer-core` 只找 `~/.dsh/profiles/web`**：本机早已没有 web profile，解析永远失败 → 脚本直接 `SKIP` 退出（exit 0），看起来「没报错」，其实是**什么都没测**。**修法**：解析顺序改为 `DSH_SMOKE_PROFILE` → `web` → `desktop` → `default` → `acp` → 本仓库。
+    3. **设置中心入口选择器过时**：内核把「设置」挪进了账号下拉菜单，`button[data-slot=sidebar.settings]` 现在只负责**打开菜单**，点它不会进设置中心；旧脚本因此拿不到 `[data-set-root]`。**修法**：先点槽位按钮开菜单，再点菜单项 `[role=menuitem]`（其 textContent 是 `设置Ctrl+Alt+,`，快捷键作为子节点拼接，不能用精确相等匹配），最后点左侧导航项。顺带把写死的「三个偏好行」改成**逐行点名**（工作区徽章 / 默认折叠 / 输出速度计 / 右键菜单，缺哪行报哪行，行数变化不误报）。
+  - **修复结果**：真机冒烟 12/16 → **23/23 全绿**（含「功能一双按钮座位真的渲染 `{"seat":1,"btn":2,"fallback":null}`」「设置页四个偏好行都在」）。
+  - **白底白字隐患**：`demo/two-button-model-open.html` 的面板根规则还留着 `color: var(--dsw-alias-label-primary)`，而该 token 在本机浅色主题下解析成 `#f9fafb`（近白）——落在写死的实底 `#f8f9fa` 上等于隐形（浅色主题下整张列表看不见字）。**修法**：面板根 `color` 字面写死 `#1b1d20`，并给 `.mss-row` 补浅色/深色两条字面 `color`，与 v0.4.18 建立的面板自洽体系对齐；`lib/client.js` 里那段「浅色取 label-primary」的旧注释同步改正。
+  - **不受影响**：`lib/client.js` 面板根 `color` 本来就是字面 `#0f1115` / 深色 `#f9fafb`，真机计算样式实测 `panelBg=rgb(44,44,46)`、`backdrop-filter=none`、分组标题 `rgb(185,190,198)`、选中底 `rgba(90,140,250,.22)`，全部符合预期。
+  - **关于用户截图里那个半透明列表**：那不是本插件——是**内核**工作区选择器的 `MenuSurface`（`data-menu-material="translucent"` + `--dsw-menu-surface-fill` 半透明 + `blur(40px)`）。插件面板自 v0.4.13 起就是实底。
+  - **需要刷新页面**：本次只改 `demo/` 与 `tools/`，不动 `lib/client.js` 的 CSS 逻辑，已装插件无需重装；看 demo 直接刷新即可。
+- **v0.4.18（历史）**：修掉功能一弹出列表的「**文字不自适应**」（用户实测：按钮弹窗的列表文字发灰、选中项看不清）。
   - **问题**：v0.4.16 只把**面板根节点**的文字换成了字面值，而面板里的子元素仍在引用内核 token：`.mss-group-title` / `.mss-empty` / `.mss-loading` 用 `--dsw-alias-label-tertiary`，`.mss-row .mss-desc` 用 `--dsw-alias-label-caption`。查内核主题源码（`@deepseek-ai/dsh-client-ui-theme/lib/client.js`）得两组 token 的两套取值：`label-tertiary` 浅色 `#81858c` / 深色 `#adb2b8`，`label-caption` 浅色 `#adb2b8` / 深色 `#81858c`。而本插件面板实底是**自己写死的** `#f8f9fa` / `#2c2c2e`，两套体系一不同步就翻车：浅色面板 `#f8f9fa` 配 `#81858c` 只有约 3.3:1，11px 小字直接发灰；深色面板 `#2c2c2e` 配 caption `#81858c` 约 3.2:1。同一根因还带出三个隐性可见问题：选中底用 `color-mix(in srgb, var(--dsw-alias-brand-primary) 12%)`，而本机 `brand-primary` 解析成**近黑**（bluish-1000），浅色面板上那层选中底几乎看不见；勾选色用 `--dsw-alias-brand-text`（本机同样近黑），在深色面板上等于隐形；hover 底用 `--dsw-alias-interactive-bg-hover`（浅色 `#2631480f`），是给内核表面调的，落在本插件实底上偏薄。
   - **改法**：把面板内**每一个文字层**（面板根 / 分组标题 / 选项描述 / 空态+加载态）与**三种交互底**（hover / 选中 / 选中+hover）以及勾选色全部改成**字面值、深浅各一套**，用 `[data-ds-dark-theme]` 属性选择器切档（比 `light-dark()` 兼容性稳，DSH 桌面端不保证 Chrome 123+）。取色都按对各自实底的 WCAG 对比度反推：分组标题 `#5f6469` 浅 5.67:1 / `#b9bec6` 深 7.46:1，描述 `#6a7079` 浅 4.74:1 / `#a7adb6` 深 6.17:1，勾选 `#4176e6` 浅 4.02:1 / `#6a9bff` 深 5.14:1，选中底浅 `rgba(65,118,230,.12)` / 深 `rgba(90,140,250,.22)`。由此**面板配色完全自洽**，不再与内核任何一次主题改动产生牵动。
   - **为什么不用 `var(--x, fallback)` 兜底**：兜底只在 token 缺席时生效，而本机 token 恰恰是「存在但取值不适合这套实底」，兜底永远轮不到。

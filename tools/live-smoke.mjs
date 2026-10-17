@@ -38,11 +38,14 @@ if (!TARGET) {
 
 /* ── puppeteer-core：优先按 web profile 解析（社区插件常装在那里），退回本仓库 ── */
 let puppeteer = null;
-for (const base of [path.join(homedir(), ".dsh", "profiles", "web", "package.json"), path.join(HERE, "package.json")]) {
+const profileBases = [process.env.DSH_SMOKE_PROFILE, "web", "desktop", "default", "acp"]
+	.filter((name) => typeof name === "string" && name.length > 0)
+	.map((name) => path.join(homedir(), ".dsh", "profiles", name, "package.json"));
+for (const base of [...profileBases, path.join(HERE, "package.json")]) {
 	try { puppeteer = createRequire(base)("puppeteer-core"); break; } catch { /* 换下一个 base */ }
 }
 if (puppeteer === null) {
-	console.log("SKIP 未安装 puppeteer-core（可在 ~/.dsh/profiles/web 下安装，或在本仓库 npm i -D puppeteer-core）");
+	console.log("SKIP 未安装 puppeteer-core（可在任一 ~/.dsh/profiles/<name> 下安装，或在本仓库 npm i -D puppeteer-core；也可用 DSH_SMOKE_PROFILE 指定 profile）");
 	process.exit(0);
 }
 
@@ -117,6 +120,26 @@ const browser = await puppeteer.launch({
 try {
 	const page = await browser.newPage();
 	await page.setViewport({ width: 1440, height: 900 });
+	// v0.4.18：桌面端启动的 Web 端口不接受裸 URL（401），且 launch token 只存在于进程内存。
+	// 允许用 DSH_SMOKE_COOKIE 直接注入已签名的会话 cookie（格式 dsh-auth-<hash>=v1.<body>.<sig>）。
+	if (process.env.DSH_SMOKE_COOKIE) {
+		const at = TARGET.indexOf("//") + 2;
+		const slash = TARGET.indexOf("/", at);
+		const host = slash < 0 ? TARGET.slice(at) : TARGET.slice(at, slash);
+		const cookieUrl = `http://${host}/`;
+		for (const part of process.env.DSH_SMOKE_COOKIE.split(";")) {
+			const eq = part.indexOf("=");
+			if (eq <= 0) continue;
+			await page.setCookie({
+				name: part.slice(0, eq).trim(),
+				value: part.slice(eq + 1).trim(),
+				domain: host.split(":")[0],
+				path: "/",
+				httpOnly: true
+			});
+		}
+		console.log(`  （已注入会话 cookie → ${cookieUrl}）`);
+	}
 	const consoleErrors = [];
 	const pageErrors = [];
 	const pluginTexts = [];
@@ -168,13 +191,27 @@ try {
 	check("点开设置入口（sidebar.settings）", opened);
 	if (opened) {
 		await new Promise((r) => setTimeout(r, 2500));
+		// v0.4.19：内核把「设置」挪进了账号下拉菜单（button[data-slot=sidebar.settings] 现在只负责开菜单，
+		// 点它本身不会再进设置中心）。所以这里必须先点菜单里的「设置 Ctrl+Alt+,」，再点左侧导航项。
+		// 菜单项的 textContent 是「设置Ctrl+Alt+,」（快捷键作为子节点拼接），不能用精确相等匹配。
+		const openedCenter = await page.evaluate(() => {
+			const alreadyOpen = [...document.querySelectorAll("button")].some((el) => (el.textContent || "").trim() === "DSH UI 工具");
+			if (alreadyOpen) return "already-open";
+			const item = [...document.querySelectorAll("[role=menuitem], button")]
+				.filter((el) => /^设置(\s|Ctrl|⌘|⌥|\+|$)/.test((el.textContent || "").trim()))[0];
+			if (!item) return false;
+			item.click();
+			return "clicked";
+		});
+		check("账号菜单里有「设置」项并能进入设置中心", openedCenter !== false, String(openedCenter));
+		await new Promise((r) => setTimeout(r, 3000));
 		const navClicked = await page.evaluate(() => {
 			// 取「最深」的精确匹配节点：导航项是 button > span，祖先容器同样含该文案
 			const rows = [...document.querySelectorAll("button, [role=tab], [role=menuitem], li, a, span, div")]
 				.filter((el) => (el.textContent || "").trim() === "DSH UI 工具");
 			if (!rows.length) return false;
 			const deepest = rows.reduce((best, el) => (best.textContent.length <= el.textContent.length ? best : el), rows[0]);
-			(deepest.closest("button, [role=tab], [role=menuitem], li") ?? deepest).click();
+			(deepest.closest("button, [role=tab], [role=menuitem], li, a") ?? deepest).click();
 			return true;
 		});
 		check("导航里有并选中「DSH UI 工具」页", navClicked);
@@ -191,9 +228,13 @@ try {
 		}, MARKERS.settingsRoot);
 		check("设置页渲染出 [data-set-root]", !!set);
 		if (set) {
-			// v0.4.9 移除「修改的文件」开关后，偏好行由四行变为三行：
-			// 工作区徽章 / 启动默认折叠 / 输出速度计。
-			check("三个偏好行都在", set.rows.length === 3, set.rows.map((row) => row.label).join(" / "));
+			// v0.4.18 现状：偏好行共四行 —— 工作区徽章 / 启动默认折叠 / 输出速度计 / 右键菜单。
+			// 旧断言写死 3 行是 v0.4.9 的历史快照，会使真机 smoke 永远红；这里改为「逐行点名」，
+			// 行数变化不报错，缺任何一行才报错。
+			const labels = set.rows.map((row) => row.label).join(" / ");
+			const expectRows = ["工作区徽章", "默认折叠", "输出速度计", "右键菜单"];
+			const missing = expectRows.filter((needle) => !set.rows.some((row) => row.label.includes(needle)));
+			check("四个偏好行都在", missing.length === 0, missing.length ? `缺 ${missing.join("、")}（实际：${labels}）` : labels);
 			const chipRow = set.rows.find((row) => row.label.includes("工作区徽章"));
 			check("功能三开关（工作区徽章）在设置页", !!chipRow, JSON.stringify(chipRow ?? null));
 			const tspRow = set.rows.find((row) => row.label.includes("输出速度计"));

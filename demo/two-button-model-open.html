@@ -55,19 +55,25 @@
     background: #f8f9fa;
     border: 1px solid var(--dsw-alias-border-l2, rgba(0,0,0,.08));
     border-radius: 12px; box-shadow: var(--dsw-shadow-lv3); padding: 4px;
-    color: var(--dsw-alias-label-primary);
+    /* v0.4.19：面板文字主色必须与实底成对写死。旧版留 var(--dsw-alias-label-primary)，
+       浅色主题下该 token 解析成 #f9fafb（近白），落在 #f8f9fa 上等于隐形 ——
+       demo 里看到的「白底白字」就是它。 */
+    color: #1b1d20;
   }
   /* v0.4.18：面板内每个文字层与交互底全部改成字面值（深浅两套），不再引用内核
      label-* / brand-* / interactive-bg token —— 那些 token 跟随内核表面，与本插件
      写死的实底 #f8f9fa / #2c2c2e 是两套体系，不同步就会发灰或隐形。 */
   [data-mss-panel] .mss-group-title { color: #5f6469; font-size: 11px; line-height: 18px; padding: 5px 8px 2px; }
+  [data-mss-panel] .mss-row { color: #1b1d20; }
   [data-mss-panel] .mss-row:hover:not(:disabled) { background: rgba(0, 0, 0, .06); }
   [data-mss-panel] .mss-row[aria-checked="true"] { background: rgba(65, 118, 230, .12); }
   [data-mss-panel] .mss-row[aria-checked="true"]:hover:not(:disabled) { background: rgba(65, 118, 230, .18); }
   [data-mss-panel] .mss-row .mss-check { color: #4176e6; flex: none; font-size: 14px; }
   [data-mss-panel] .mss-row .mss-desc { display: block; color: #6a7079; font-size: 11px; line-height: 16px; }
   [data-mss-panel] .mss-empty, [data-mss-panel] .mss-loading { padding: 10px 8px; color: #5f6469; font-size: 12px; line-height: 18px; }
-  html[data-ds-dark-theme] [data-mss-panel], [data-ds-dark-theme] [data-mss-panel] { background: #2c2c2e; color: #f9fafb; }
+  [data-ds-dark-theme] [data-mss-panel] { background: #2c2c2e; color: #f9fafb; }
+  html[data-ds-dark-theme] [data-mss-panel] .mss-row,
+  [data-ds-dark-theme] [data-mss-panel] .mss-row { color: #f9fafb; }
   html[data-ds-dark-theme] [data-mss-panel] .mss-group-title,
   [data-ds-dark-theme] [data-mss-panel] .mss-group-title { color: #b9bec6; }
   html[data-ds-dark-theme] [data-mss-panel] .mss-row:hover:not(:disabled),
