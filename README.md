@@ -207,7 +207,18 @@ node tools/live-smoke.mjs <URL+token>   # 真机冒烟（可选；自动探测�
 
 ## 变更记录
 
-- **v0.4.15（本次）**：修掉**功能六（右键菜单）两个互相独立的真实缺陷** —— 用户实测「右键工作区 → 复制工作区路径」与「刷新页面」两项都没反应（两条抱怨其实是两个不同的 bug，第 ① 条还会让**所有**菜单项一起失效）。
+- **v0.4.16（本次）**：功能一两个主按钮点开的面板改成**真正写死的实底**（用户第二次确认：「两个按钮直接改成实底的，不用加设置项」，即不加开关、直接落成默认行为）。
+  - **为什么要再改一次**：v0.4.13 已经把毛玻璃（`color-mix(...)` + 两条 `backdrop-filter`）换成「不透明实底」，但底色取的是 `var(--dsw-specific-menu)`。查内核主题源码（`@deepseek-ai/dsh-client-ui-theme/lib/client.js`）后发现这个 token 并不是稳定实色：它在非 darwin 平台上就是 `--dsw-menu-surface-fill`，取值为 `#f8f9fa94`（浅色，约 58% 不透明）/ `#43454a73`（深色，约 45% 不透明）—— **引用它等于把半透明底重新引回来**，面板会透出背后的 composer 与输入框文字。这也正好解释了用户看到的「弹出是透明背景」。
+  - **改法**：基础规则写死 `background: #f8f9fa`（= 内核浅色 `--dsw-static-neutral-bluish-50`）；另加一组深色主题规则 `html[data-ds-dark-theme] [data-mss-panel], [data-ds-dark-theme] [data-mss-panel] { background: #2c2c2e; color: var(--dsw-alias-label-primary-foreground, #fff); }`（#2c2c2e = 内核 `--dsw-static-neutral-bluish-850`），同时把深色下的面板文字换成浅字——否则深底配基础规则里的近黑字会看不清。描边 / 圆角 12px / 三级投影原样保留，浮层与 composer 仍有明确分层。**不加任何设置项**，也不挂开关。
+  - **断言（`tools/check-model-seat-hug.mjs` 28 → 32 条）**：新增「底色必须是字面实色、不许引用 `--dsw-specific-menu` / `--dsw-menu-surface-fill`」「必须存在带 `data-ds-dark-theme` 的面板实底规则且不含半透明」「深色规则里必须把文字换成 `label-primary-foreground`」三条；原来那条「底色不许含 transparent / rgba 半透明」保留（负向：改回引用菜单 token → 立刻变红）。
+  - **同批第二个要求：两个主按钮加淡描边 + 文字色自适应**（用户第二次要求：「加淡描边，文字颜色自适应」）。
+    - **描边**：`border` 由 `none` 改为 `1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.12))` —— 该 token 深色为 `#ffffff1f`、浅色为 `#0000001a`，两套主题都有可见但极淡的轮廓。
+    - **文字色去向**：`color` 由 v0.4.13 写死的 `#fff` 改为 `var(--dsw-alias-label-primary, inherit)`。这个 token 本身是主题自适应的：浅色解析 `--dsw-static-neutral-bluish-1000`（近黑）、深色解析 `--dsw-static-neutral-bluish-50`（近白）。**顺带修掉一个潜伏缺陷**：写死白字在浅色主题下会变成「白字 + 近白 composer 底」直接隐形（v0.4.13 的注释里自己就写着「若日后切浅色要改回来」，这次直接按自适应解决）。
+    - **底色仍是 `transparent`**：描边已经提供可点性提示，不再加实心底；`hover` / 展开态的半透明反馈保持不变。
+    - **断言改动**：§5 由「常态文字色必须纯白」整节改写为 v0.4.16 口径 —— ① 文字色必须是 `--dsw-alias-label-primary`（若为纯白直接判红并说明「浅色主题下会隐形」）；② 必须有 `1px solid var(--dsw-alias-border-l2, ...)` 淡描边（`border: none` 判红）；③ **全表不得再出现任何纯白 `color` 规则**；④ 箭头仍 `color: inherit`；⑤ 描边/文字色规则不得牵连面板下拉项。条数 31 → 32。
+  - **预览同步**：`demo/two-button.html`、`demo/two-button-model-open.html`、`demo/two-button-provider-open.html` 里陈旧的 `color-mix(... 90%, transparent)` 一并换成 `#f8f9fa`（面板），遗留的 `backdrop-filter` 删掉，按钮补 1px 描边、文字色改 token，并在深色 `.composer` 内覆写 `--dsw-alias-label-primary` / `--dsw-alias-border-l2` 为内核深色取值，避免预览页出现近黑字配深底。
+  - `package.json` 版本 `0.4.15 → 0.4.16`。只改 `lib/client.js`、`tools/check-model-seat-hug.mjs`、三份 demo 与文档（客户端 bundle，**无构建步骤**），刷新页面或等热更新即生效。
+- **v0.4.15（历史）**：修掉**功能六（右键菜单）两个互相独立的真实缺陷** —— 用户实测「右键工作区 → 复制工作区路径」与「刷新页面」两项都没反应（两条抱怨其实是两个不同的 bug，第 ① 条还会让**所有**菜单项一起失效）。
   - **① 所有菜单项都点不动**：视口监听写成 `window.addEventListener("blur", onViewportChange, true)`。`blur` 不冒泡，但**有捕获阶段**，挂在 `window` 上的**捕获**监听因此会收到**元素级**失焦：按下鼠标时焦点从菜单第一项（菜单打开时 `first.focus()` 留在它身上）移到被点的那一项，前一项触发 `blur` → `closeCtxMenu()` 把菜单节点从 `body` 摘掉 → 紧接着的 `pointerup` / `mouseup` 落到菜单**背后**的列表行上 → **`click` 永远不会派发**。真机 HUD 轨迹是铁证：`C:pointerdown>span IN_MENU ON_ITEM` → `C:mousedown>span` → `C:pointerup>div.hIlkoa_projectRow[rk=workspace:…]` → `MENU_CLOSED`，**全程没有 `C:click`**；同一机制也解释了方向键导航「一按菜单就消失」（`next.focus()` 引发前一项 `blur`）。
     - **修法**：只监听**窗口自身**失焦 —— `const onWindowBlur = (event) => { if (event.target !== window) return; closeCtxMenu(); };` + `window.addEventListener("blur", onWindowBlur)`（**不加** capture）；`resize` 仍保留捕获监听，拆卸段对称 `removeEventListener("blur", onWindowBlur)`。
   - **② 刷新页面只弹一条 `t is not defined`、页面纹丝不动**：`ctxReload()` 位于**模块作用域**，函数体第一行 `ctxToast(t("toast.reloading"))` 却引用了 `installContextMenu(scope, t, uiWorkspace)` 的**形参** `t` —— 那个作用域里根本没有 `t`，`ReferenceError` 又在 `try` **之外**抛出，于是 `window.location.reload()` 与 150ms 的 `location.replace` 兜底**一次都没跑到**，只剩菜单项 `catch` 弹出的那条报错（真机截图里的 toast 文案就是 `t is not defined`）。

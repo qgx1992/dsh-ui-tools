@@ -593,7 +593,7 @@ section("4. 主按钮背景（v0.4.11：常态透明，交互态保留反馈）"
 	else bad("透明背景规则未牵连面板内的下拉项（[data-mss-row] 不命中）");
 }
 
-section("5. 主按钮文字色（v0.4.13：常态纯白，范围不外溢）");
+section("5. 主按钮文字色与描边（v0.4.16：文字色自适应主题 + 淡描边，不再写死纯白）");
 {
 	const norm = (v) => (typeof v === "string" ? v.trim().toLowerCase().replace(/\s+/g, "") : v);
 	const isWhite = (v) => {
@@ -609,33 +609,44 @@ section("5. 主按钮文字色（v0.4.13：常态纯白，范围不外溢）");
 		}
 	}
 
-	// ① 常态文字色必须解析成纯白
-	if (isWhite(decls["color"])) ok("主按钮常态文字色 = 纯白（用户要求）");
-	else bad("主按钮常态文字色 = 纯白（用户要求）", `实得 ${JSON.stringify(decls["color"])}`);
-
-	// ② 白字规则的范围必须严格限定在 [data-mss-btn]，不许外溢到面板/其它控件
-	const whiteRules = rules.filter((r) => isWhite(r.decls["color"]));
-	if (whiteRules.length > 0 && whiteRules.every((r) => r.selectors.every((s) => s.trim() === "[data-mss-btn]"))) {
-		ok("纯白文字只落在 [data-mss-btn] 这一条规则上（未外溢到面板/其它控件）", `${whiteRules.length} 条`);
+	// ① 常态文字色必须走主题自适应 token，不许再写死纯白
+	// （写死 #fff 在浅色主题下 = 白字 + 近白 composer 底，直接隐形）
+	const colorTok = norm(decls["color"]);
+	if (colorTok === "var(--dsw-alias-label-primary,inherit)") {
+		ok("主按钮常态文字色 = --dsw-alias-label-primary（随主题自适应深浅）", `${JSON.stringify(decls["color"])}`);
+	} else if (isWhite(decls["color"])) {
+		bad("主按钮常态文字色 = --dsw-alias-label-primary（随主题自适应深浅）", "仍是写死的纯白，浅色主题下会隐形");
 	} else {
-		bad("纯白文字只落在 [data-mss-btn] 这一条规则上（未外溢到面板/其它控件）", whiteRules.map((r) => r.selectors.join(", ")).join(" ; ") || "一条都没有");
+		bad("主按钮常态文字色 = --dsw-alias-label-primary（随主题自适应深浅）", `实得 ${JSON.stringify(decls["color"])}`);
 	}
 
-	// ③ 箭头靠 color: inherit 跟随文字一起变白（否则白字配深色箭头）
-	const caret = rules.find((r) => r.selectors.some((s) => s.trim() === "[data-mss-btn] .mss-caret"));
-	if (caret && norm(caret.decls["color"]) === "inherit") ok("按钮内箭头用 color: inherit，随文字一起变白");
-	else bad("按钮内箭头用 color: inherit，随文字一起变白", caret ? JSON.stringify(caret.decls["color"]) : "找不到该规则");
+	// ② 淡描边必须在：用 border-l2 那档（深色 #ffffff1f / 浅色 #0000001a），淡而可见
+	const border = norm(decls["border"]);
+	const hasStroke = typeof border === "string" && /^1pxsolidvar\(--dsw-alias-border-l2/.test(border);
+	if (hasStroke) ok("主按钮有 1px 淡描边（--dsw-alias-border-l2，深浅主题都可见）", `${JSON.stringify(decls["border"])}`);
+	else if (typeof border === "string" && border.startsWith("none")) bad("主按钮有 1px 淡描边（--dsw-alias-border-l2，深浅主题都可见）", "仍是 border: none（完全无轮廓）");
+	else bad("主按钮有 1px 淡描边（--dsw-alias-border-l2，深浅主题都可见）", `实得 ${JSON.stringify(decls["border"])}`);
 
-	// ④ 反向：面板内的下拉项不该被染白（浅色菜单里必须仍是深色文字）
+	// ③ 白字规则必须彻底消失（含面板/其它控件）；不许有第二条规则把它染回白色
+	const whiteRules = rules.filter((r) => isWhite(r.decls["color"]));
+	if (whiteRules.length === 0) ok("全表已无纯白文字规则（v0.4.13 的写死白字已移除）");
+	else bad("全表已无纯白文字规则（v0.4.13 的写死白字已移除）", whiteRules.map((r) => `${r.selectors.join(", ")} { color: ${r.decls["color"]} }`).join(" ; "));
+
+	// ④ 箭头靠 color: inherit 跟随文字一起自适应
+	const caret = rules.find((r) => r.selectors.some((s) => s.trim() === "[data-mss-btn] .mss-caret"));
+	if (caret && norm(caret.decls["color"]) === "inherit") ok("按钮内箭头用 color: inherit，随文字一起自适应");
+	else bad("按钮内箭头用 color: inherit，随文字一起自适应", caret ? JSON.stringify(caret.decls["color"]) : "找不到该规则");
+
+	// ⑤ 反向：面板内的下拉项不该被描边/文字色规则牵连
 	const rowEl = new El("button", { "data-mss-row": "", class: "mss-row" });
-	let rowWhite = false;
+	let rowHit = false;
 	for (const r of rules) {
 		for (const s of r.selectors) {
-			if (rowEl.matchesSelector(s) && isWhite(r.decls["color"])) rowWhite = true;
+			if (rowEl.matchesSelector(s) && (isWhite(r.decls["color"]) || r.decls["border"] !== void 0)) rowHit = true;
 		}
 	}
-	if (!rowWhite) ok("下拉项未被染白（[data-mss-row] 不命中任何白字规则）");
-	else bad("下拉项未被染白（[data-mss-row] 不命中任何白字规则）");
+	if (!rowHit) ok("按钮的文字色/描边规则未牵连面板内的下拉项（[data-mss-row] 不命中）");
+	else bad("按钮的文字色/描边规则未牵连面板内的下拉项（[data-mss-row] 不命中）");
 }
 
 section("6. 弹出列表底色（v0.4.13：完全不透明实底，不许再有毛玻璃）");
@@ -657,6 +668,27 @@ section("6. 弹出列表底色（v0.4.13：完全不透明实底，不许再有�
 	} else {
 		bad("面板不再使用 backdrop-filter（毛玻璃已移除）", JSON.stringify({ bf: panelDecls["backdrop-filter"], wk: panelDecls["-webkit-backdrop-filter"] }));
 	}
+
+	// ②b v0.4.16：底色必须是字面写死的实色，不许再引用 --dsw-specific-menu
+	// —— 那个 token 由内核解析成 --dsw-menu-surface-fill，非 darwin 平台下是
+	// #f8f9fa94 / #43454a73 这种半透明值，引用它等于把透明底重新引回来。
+	if (bg && !bg.includes("specific-menu") && !bg.includes("menu-surface")) {
+		ok("面板底色为字面实色、不引用会漂移成半透明的菜单 token", `${JSON.stringify(panelDecls["background"])}`);
+	} else {
+		bad("面板底色为字面实色、不引用会漂移成半透明的菜单 token", bg ? `实得 ${JSON.stringify(panelDecls["background"])}` : "找不到 [data-mss-panel] 的 background");
+	}
+
+	// ②c v0.4.16：深色主题必须有一套不透明实底，否则深夜主题下是一块亮白浮层
+	const darkBgRules = rules.filter((r) => r.selectors.some((s) => s.includes("data-ds-dark-theme") && s.includes("[data-mss-panel]")));
+	const darkBg = darkBgRules.map((r) => norm(r.decls["background"])).filter(Boolean);
+	const darkBad = darkBg.filter((v) => v.includes("transparent") || /rgba\([^)]*,\s*0?\.\d+\s*\)/.test(v) || v.includes("specific-menu"));
+	if (darkBg.length > 0 && darkBad.length === 0) ok("深色主题面板底色是不透明实底（无半透明 / 无菜单 token 引用）", darkBg.map((v) => JSON.stringify(v)).join(" , "));
+	else bad("深色主题面板底色是不透明实底（无半透明 / 无菜单 token 引用）", darkBg.length === 0 ? "找不到带 data-ds-dark-theme 的 [data-mss-panel] 规则" : darkBad.join(" , "));
+
+	// ②d 深色实底必须同时换浅色文字，否则深底 + 近黑字看不清
+	const darkText = darkBgRules.map((r) => norm(r.decls["color"])).filter(Boolean);
+	if (darkText.some((v) => v.includes("label-primary-foreground"))) ok("深色主题面板文字改取 label-primary-foreground（深底配浅字）");
+	else bad("深色主题面板文字改取 label-primary-foreground（深底配浅字）", darkText.join(" , ") || "深色规则里没有 color");
 
 	// ③ 分层不能一起删掉：描边 / 圆角 / 投影必须还在，否则实底菜单会「贴」在输入框上
 	const keep = ["border", "border-radius", "box-shadow"].filter((k) => panelDecls[k] !== void 0);
