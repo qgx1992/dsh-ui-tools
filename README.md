@@ -207,7 +207,13 @@ node tools/live-smoke.mjs <URL+token>   # 真机冒烟（可选；自动探测�
 
 ## 变更记录
 
-- **v0.4.16（本次）**：功能一两个主按钮点开的面板改成**真正写死的实底**（用户第二次确认：「两个按钮直接改成实底的，不用加设置项」，即不加开关、直接落成默认行为）。
+- **v0.4.17（本次）**：只动**断言工具**，插件运行时（`lib/client.js` / `lib/index.js`）一行未改。
+  - **问题**：`tools/compat-check.mjs` 的「未知依赖模块兜底桩」写成 `new Proxy({}, { get: () => () => ({}) })` —— 任何属性都返回一个普通函数。内核 bundle 里有 `class X extends SomeBase` 这类写法，而普通函数不可当基类，于是抛 `Class extends value () => ({}) is not a constructor`；该异常又被外层的 `catch` 静默吞掉，整段 B3 判为空，最终对外表现成「本机找不到内核副本，本节跳过」。**这是断言工具自己的假绿，不是内核缺失**。
+  - **改法**：换成「可调用 + 可构造 + 任意属性返回自身」的 Proxy 兜底（`apply` 返回自身、`construct` 返回空对象、`prototype` 返回空对象、`then`/`toJSON`/`Symbol.toPrimitive` 返回 `undefined` 以免被当成 thenable），并补齐 `react-dom` 与 `useLayoutEffect` / `useReducer` / `useTransition` / `useDeferredValue` / `useId` / `useDebugValue` / `createContext().Provider` 等形状。
+  - **效果**：断言数 86/87（B3 整组被吞）→ **91/91**，五个真内核断言全部真跑：流式增量后节点物化为 visible、`settleAssistant` 收尾不抛 withdrew、收尾后节点转 hidden、多回合连续会话全程无异常、每回合都重新物化出可见读数。
+  - **不需要重新构建或刷新**：本次只改 `tools/` 下的校验脚本与文档，客户端 bundle 无变化。
+
+- **v0.4.16（历史）**：功能一两个主按钮点开的面板改成**真正写死的实底**（用户第二次确认：「两个按钮直接改成实底的，不用加设置项」，即不加开关、直接落成默认行为）。
   - **为什么要再改一次**：v0.4.13 已经把毛玻璃（`color-mix(...)` + 两条 `backdrop-filter`）换成「不透明实底」，但底色取的是 `var(--dsw-specific-menu)`。查内核主题源码（`@deepseek-ai/dsh-client-ui-theme/lib/client.js`）后发现这个 token 并不是稳定实色：它在非 darwin 平台上就是 `--dsw-menu-surface-fill`，取值为 `#f8f9fa94`（浅色，约 58% 不透明）/ `#43454a73`（深色，约 45% 不透明）—— **引用它等于把半透明底重新引回来**，面板会透出背后的 composer 与输入框文字。这也正好解释了用户看到的「弹出是透明背景」。
   - **改法**：基础规则写死 `background: #f8f9fa`（= 内核浅色 `--dsw-static-neutral-bluish-50`）；另加一组深色主题规则 `html[data-ds-dark-theme] [data-mss-panel], [data-ds-dark-theme] [data-mss-panel] { background: #2c2c2e; color: var(--dsw-alias-label-primary-foreground, #fff); }`（#2c2c2e = 内核 `--dsw-static-neutral-bluish-850`），同时把深色下的面板文字换成浅字——否则深底配基础规则里的近黑字会看不清。描边 / 圆角 12px / 三级投影原样保留，浮层与 composer 仍有明确分层。**不加任何设置项**，也不挂开关。
   - **断言（`tools/check-model-seat-hug.mjs` 28 → 32 条）**：新增「底色必须是字面实色、不许引用 `--dsw-specific-menu` / `--dsw-menu-surface-fill`」「必须存在带 `data-ds-dark-theme` 的面板实底规则且不含半透明」「深色规则里必须把文字换成 `label-primary-foreground`」三条；原来那条「底色不许含 transparent / rgba 半透明」保留（负向：改回引用菜单 token → 立刻变红）。

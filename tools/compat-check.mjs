@@ -298,14 +298,34 @@ function loadKernelAssemblers() {
 		const kernelReact = Object.assign({}, reactStub, {
 			memo: (fn) => fn,
 			createElement: () => ({}), jsx: () => ({}), jsxs: () => ({}),
-			useCallback: (fn) => fn, useContext: () => ({}), createContext: () => ({}),
-			forwardRef: (fn) => fn, Fragment: Symbol("Fragment")
+			useCallback: (fn) => fn, useContext: () => ({}), createContext: () => ({ Provider: () => ({}) }),
+			forwardRef: (fn) => fn, Fragment: Symbol("Fragment"),
+			useLayoutEffect: () => {}, useReducer: (reducer, init) => [init, () => {}],
+			useTransition: () => [false, () => {}], useDeferredValue: (v) => v,
+			useId: () => "stub-id", useDebugValue: () => {}
 		});
+		// 未知依赖模块的通用桩：内核 bundle 会 `class X extends SomeBase`、`zod.z.string()`、
+		// `store.create(...)` 等。`() => ({})` 形状会在 class 继承处报
+		// 「Class extends value () => ({}) is not a constructor」，故用「可调用 + 可构造 +
+		// 任意属性都返回自身」的 Proxy 兜底，只让真正缺失的 API 暴露成错误。
+		const stub = (() => {
+			const target = function stub() { /* noop */ };
+			const self = new Proxy(target, {
+				get: (_t, key) => {
+					if (key === "prototype") return {};
+					if (key === "then" || key === Symbol.toPrimitive || key === "toJSON" || key === "toString") return void 0;
+					return self;
+				},
+				apply: () => self,
+				construct: () => ({})
+			});
+			return self;
+		})();
 		try {
 			const mod = captured.factory((id) => {
 				if (id === "@deepseek-ai/cordis") return { Context: Context, Service: Service };
-				if (id === "react" || id === "react/jsx-runtime") return kernelReact;
-				return new Proxy({}, { get: () => () => ({}) });
+				if (id === "react" || id === "react/jsx-runtime" || id === "react-dom") return kernelReact;
+				return stub;
 			});
 			if (mod && typeof mod.ConversationNodeAssembler === "function") {
 				return { ConversationNodeAssembler: mod.ConversationNodeAssembler, kernel: label };
