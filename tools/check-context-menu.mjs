@@ -2077,6 +2077,37 @@ await (async () => {
 		if (hasPath && hasEndpoint && hasRegister) ok("宿主半边用 connection.fetch.register 注册了 /api/ui-tools/sessionDelete（不是空壳）");
 		else bad(`宿主半边没注册路由（path=${hasPath} endpoint=${hasEndpoint} register=${hasRegister}）—— 删了磁盘但请求根本到不了`);
 	}
+
+	// ── 静态：路由回调必须只声明 1 个形参，且不许拿 peer 做鉴权 ──
+	//
+	// 真机踩过的坑（v0.4.20 → v0.4.21 第二个必现 bug）：
+	// 内核 createSharedFetchHandler（dsh-client-connection:826-838）是这么调的：
+	//     if (peer.principal.kind !== "owner") return new Response("forbidden", {status:403});  // :830
+	//     return route.fetch(request);                                                          // :831
+	// :831 **只传一个参数**，peer 根本没往下传。所以
+	//     async fetch(request, peer) { if (peer?.principal?.kind !== "owner") return 403; … }
+	// 里 peer 恒为 undefined ⇒ 判据恒为真 ⇒ 每一次删除都 403「只有本机会话可以删除会话」。
+	// 它看起来像一道安全闸门，排查时几乎不会怀疑到「这个参数根本不存在」。
+	// 鉴权已由内核 :830 完成，插件侧不需要也不应该再加一道。
+	{
+		const hostPath = new URL("../lib/index.js", import.meta.url);
+		let hostText = "";
+		try { hostText = fs.readFileSync(hostPath, "utf8"); } catch { hostText = ""; }
+		const codeOnly = stripComments(hostText);
+		const sig = codeOnly.match(/\basync\s+fetch\s*\(([^)]*)\)/);
+		const paramCount = sig === null ? -1 : sig[1].split(",").filter((part) => part.trim() !== "").length;
+		if (paramCount === 1) ok("宿主 fetch 回调只声明 1 个形参（内核 :831 只传 request，多写的 peer 恒为 undefined）");
+		else bad(`宿主 fetch 回调形参个数 = ${paramCount}，必须是 1 —— 内核 :831 只传 request，声明 peer 会让每一次删除都被自己拦成 403`);
+		const peeksPeer = /\bpeer\s*\??\s*\.\s*principal/.test(codeOnly);
+		if (!peeksPeer) ok("宿主 fetch 回调不拿 peer.principal 做鉴权（鉴权在内核 :830，插件侧再加一道等于把功能关死）");
+		else bad("宿主 fetch 回调在拿 peer.principal 做鉴权 —— 内核调 route.fetch 时不传 peer，这段判据恒为真（必然 403）");
+		// 负向对照：把形参改回 `(request, peer)`，上面第一条必须变红。
+		const brokenText = codeOnly.replace(/\basync\s+fetch\s*\(\s*request\s*\)/, "async fetch(request, peer)");
+		const brokenSig = brokenText.match(/\basync\s+fetch\s*\(([^)]*)\)/);
+		const brokenCount = brokenSig === null ? -1 : brokenSig[1].split(",").filter((part) => part.trim() !== "").length;
+		if (brokenCount === 2) ok("负向对照：把形参改回 (request, peer) 后「只声明 1 个形参」会变红（上面那条不是摆设）");
+		else bad(`负向对照失效：改回 (request, peer) 后形参个数仍是 ${brokenCount} —— 这条断言抓不住初版的 bug`);
+	}
 })();
 
 /* ══════════════════════════════════════════════════════════════

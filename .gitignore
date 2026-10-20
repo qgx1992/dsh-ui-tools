@@ -11,3 +11,7 @@ AGENT.md
 
 # 一次性排障脚本（本机保留，不进仓库）
 .scratch/
+
+# 本仓库零依赖，没有也不该有锁文件（曾因 pwsh 里 cd 路径写错误建空文件）
+pnpm-lock.yaml
+package-lock.json
