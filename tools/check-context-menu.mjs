@@ -1797,6 +1797,83 @@ await (async () => {
 		if (/window\s*\.\s*setTimeout\s*\(/.test(text)) ok("ctxToast 清理定时器优先走 window.setTimeout（与 ctxReload 同一纪律）");
 		else bad("ctxToast 走裸 setTimeout —— 测试台/宿主里会与真实时钟混用，提示会被旧令牌清掉");
 	}
+
+	// ── 宿主半边没加载：必须翻译成「请重启 DSH」，不能把 405 原文甩给用户 ──
+	//
+	// 真实成因（app.asar 里逐行核过，别猜）：插件宿主半边把路由注册进
+	// connection 的 rpc 通道 /ui-tools；宿主进程只在**启动时**跑一次
+	// runProfile（dsh-desktop-host/lib/index.js 的 main），没有热重载。
+	// 装完插件不重启 DSH 时 /ui-tools 根本不存在，请求掉进
+	// dsh-host-frontend-static 的 fallback ——
+	//   `if (req.method !== "GET" && req.method !== "HEAD") { res.writeHead(405); res.end(); }`
+	// 于是客户端拿到的是一个**非业务**的 405，而不是 {ok:false,error} 信封。
+	// 若原样显示，用户看到的是「删除失败：405」这种东西，根本不知道要去重启。
+	{
+		// 通道在、但服务端没有这个路由：rpc.call 直接 reject 一个 405。
+		const env = buildEnv();
+		const stores = makeStores();
+		const connection = {
+			rpc: {
+				call: () => {
+					const error = new Error("405 method not allowed");
+					error.status = 405;
+					return Promise.reject(error);
+				}
+			}
+		};
+		install(env, { sessions: stores.sessions, workspaces: stores.workspaces, uiWorkspace: stores.uiWorkspace, connection });
+		const tree = buildTree(env);
+		tree.sessionRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
+		document.body.querySelector(".dsh-ctx-menu").querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("删除会话")).dispatchEvent(makeEvent("click"));
+		document.body.querySelector(".dsh-ctx-confirm").querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("永久删除")).dispatchEvent(makeEvent("click"));
+		await new Promise((resolve) => setImmediate(resolve));
+		const toast = document.body.querySelector(".dsh-ctx-toast");
+		const text = toast === null ? "" : toast.textContent;
+		if (text.includes("宿主半边") && /重启|重装/.test(text)) ok("宿主路由缺失时提示指向「重启 DSH」而不是 405 原文", text.slice(0, 48));
+		else bad("宿主路由缺失时提示没指向重启 —— 用户看到的就是一句没头没脑的 HTTP 状态码", text || "（无 toast）");
+	}
+
+	// ── 负向对照：把 no-host 这个码改成别的，上面那条必须变红 ──
+	{
+		// 只改「路由缺失 → no-host」这一处判定，让它永远不生效：
+		// 提示就退回成「删除失败：405 method not allowed」。
+		const brokenEnv = buildBrokenEnv("ctxCallSessionDelete", (text) => text.replace('failure.code = routeMissing ? "no-host" : "delete-failed";', 'failure.code = "delete-failed";'));
+		const env = buildEnv(brokenEnv);
+		const stores = makeStores();
+		const connection = {
+			rpc: {
+				call: () => {
+					const error = new Error("405 method not allowed");
+					error.status = 405;
+					return Promise.reject(error);
+				}
+			}
+		};
+		install(env, { sessions: stores.sessions, workspaces: stores.workspaces, uiWorkspace: stores.uiWorkspace, connection });
+		const tree = buildTree(env);
+		tree.sessionRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
+		document.body.querySelector(".dsh-ctx-menu").querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("删除会话")).dispatchEvent(makeEvent("click"));
+		document.body.querySelector(".dsh-ctx-confirm").querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("永久删除")).dispatchEvent(makeEvent("click"));
+		await new Promise((resolve) => setImmediate(resolve));
+		const toast = document.body.querySelector(".dsh-ctx-toast");
+		const text = toast === null ? "" : toast.textContent;
+		if (!(text.includes("宿主半边") && /重启|重装/.test(text))) ok("负向对照：no-host 判定被拆掉后「重启提示」会变红（上面那条不是摆设）", text.slice(0, 48) || "（无 toast）");
+		else bad("负向对照失效：判定拆掉了提示依然是重启", text);
+	}
+
+	// ── 静态：宿主半边 lib/index.js 必须真的注册了 /ui-tools 通道 ──
+	// 客户端叫 ctxCallSessionDelete，宿主叫 sessionDelete；两边常量各写各的，
+	// 一旦有一边改名，运行时就是「点了没反应」，而语法/断言全绿。
+	{
+		const hostPath = new URL("../lib/index.js", import.meta.url);
+		let hostText = "";
+		try { hostText = fs.readFileSync(hostPath, "utf8"); } catch { hostText = ""; }
+		const hasChannel = /['"]\/ui-tools['"]/.test(hostText);
+		const hasEndpoint = /sessionDelete/.test(hostText);
+		const hasRegister = /rpc\s*\.\s*handle\s*\(/.test(hostText);
+		if (hasChannel && hasEndpoint && hasRegister) ok("宿主半边注册了 /ui-tools 通道与 sessionDelete 端点（不是空壳）");
+		else bad(`宿主半边没注册路由（channel=${hasChannel} endpoint=${hasEndpoint} register=${hasRegister}）—— 删了磁盘但请求根本到不了`);
+	}
 })();
 
 /* ══════════════════════════════════════════════════════════════

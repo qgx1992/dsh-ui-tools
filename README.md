@@ -103,8 +103,11 @@ DSH Web 插件：六个 UI 工具合并成一个包，只动对应控件，不�
 - **删完不调 `workspaces.archiveSession()`。** `archiveSession` 第一步是 `await this.sessionKnown(id)`，文件已删 → 查不到 → 抛 `WorkspaceUnknownSessionError`。删完之后的收尾是三步：`workspaces.stopSessionActivity(id)`（停宿主侧活动）、若是当前会话则 `uiWorkspace.clearMain()`（释放主视图引用）、`sessions.refresh()`（重拉列表基线，行才会消失）。
 - **二次确认是硬门槛。** 菜单项点下去**不会立刻发请求**，菜单原地换成 `role="alertdialog"` 确认条，点名要删哪个会话、写明不可撤销，危险按钮排最后、默认焦点落在「取消」，<kbd>Esc</kbd> 也能取消。断言钉死「确认前发出的删除请求数 = 0」。
 - **失败不装作成功。** 服务端拒绝（not found / forbidden / 落盘定位失败）时把**真实原因**显示给用户，且**不摘掉列表行**——避免「看起来删了其实还在」。通道缺席时同样给可读提示，不泄漏内部 `TypeError`。
+- **宿主路由不存在时说「请重启 DSH」，不说 HTTP 状态码。** 宿主进程只在**启动时**装配一次 profile（`dsh-desktop-host` 的 `main()` 里跑一遍 `runProfile`），没有热重载。装完插件不重启，`/ui-tools` 这条通道根本不存在，请求会掉进 `frontend-static` 的兜底处理器 —— 那里对非 `GET`/`HEAD` 一律 `405`。所以客户端专门把这种**非业务**的 404/405 识别成 `no-host`，提示「插件宿主半边未加载（宿主进程只在启动时装配插件）……请重启 DSH 后重试」。**否则用户看到的是一句没头没脑的 `删除失败：405 method not allowed`，根本不知道该去重启。**
 
 > ⚠ **已知边界**：正在生成中的会话被删后，宿主 agent 可能在收尾时重建日志（插件已尽力先 `cancel`，但这是尽力而为）；本功能**不级联删除子会话分支**；工作区里残留的 id 由内核下次对账时自愈（`groupByWorkspace` 对 `list.byId[id] === undefined` 直接跳过，不会渲染死账）。
+>
+> ⚠ **装完必须重启 DSH**（不是刷新页面）。宿主半边是新写进 `lib/index.js` 的，只同步文件不重启，菜单会出现但点了只会提示「宿主半边未加载」。
 
 ### 目标识别：为什么不能用 `aria-label`
 
@@ -218,7 +221,7 @@ node tools/live-smoke.mjs <URL+token>   # 真机冒烟（可选；自动探测�
 
 `tools/check-hooks-order.mjs` 专治一类**只在特定状态切换时才炸**的崩溃：React 靠「Hook 调用顺序 + 数组下标」识别 Hook，而它**从不清空 hook 数组**，只按 `hookIndex++` 覆盖——于是 `if (!cond) return null;` 夹在两个 Hook 之间时，`cond` 为假的那次渲染里后续 Hook 槽位残留上一次的值（若上次该槽是 `undefined`，卸载时 React 执行 `destroy()` 直接抛 `undefined is not a function`）。脚本用纯词法扫描（不引入 babel/typescript，守 R6）切出每个函数组件的函数体、跟踪最外层 `return` 与 `useXxx(` 调用的相对位置，命中即 FAIL；并自带双向负向对照（违规样例必红 + 合规写法不误报），确保断言本身不会退化成同义反复。
 
-`tools/check-context-menu.mjs` 用**手写 DOM 测试台**（零依赖，不引 jsdom）跑功能六的 152 条断言：从 `lib/client.js` 里按花括号配平**取出真实函数**注入沙箱执行，并把 `CTX_ZH` 词典求值出来做文案核对（断言看的是用户真正会看到的字，不是 stub 返回的键名）。覆盖判据识别（含「工作区行不被误判成会话行」）、三级降级与**标题歧义必须返回 null**、菜单组装与空菜单拒绝、三类目标的右键分发、键盘与外部点击、卸载后三类监听全部解绑且补丁摘干净、**动作真的调到官方服务而非空壳**、动作抛错不冒泡、不引用参考插件包名、CSS 并入共享标签、开关门控语义，以及 v0.4.20 的**删除会话全链路**（二次确认不可跳过、载荷字段逐字正确、宿主半边通道/端点常量与客户端一致、`connection.rpc.handle` 而非裸路由、可选服务确实没进 `inject`、删完不调 `archiveSession` 而调 `stopSessionActivity` + `clearMain` + `refresh`、失败不摘行、通道缺席给可读原因）。**负向对照必须真的变红**：判据改坏的方式是把源码文本改掉后重新编译沙箱（给 `env.ctxSessionRowId` 重新赋值是**无效**的——闭包内的调用走词法绑定，改不到；这一点本身就是踩过的坑）。另外，凡是「代码里不许出现 X」的断言都先**剥离注释**再比对，否则文件顶部写明「参考插件：@baihejiangnan/…」「无 MutationObserver」会把注释当代码判红。
+`tools/check-context-menu.mjs` 用**手写 DOM 测试台**（零依赖，不引 jsdom）跑功能六的 155 条断言：从 `lib/client.js` 里按花括号配平**取出真实函数**注入沙箱执行，并把 `CTX_ZH` 词典求值出来做文案核对（断言看的是用户真正会看到的字，不是 stub 返回的键名）。覆盖判据识别（含「工作区行不被误判成会话行」）、三级降级与**标题歧义必须返回 null**、菜单组装与空菜单拒绝、三类目标的右键分发、键盘与外部点击、卸载后三类监听全部解绑且补丁摘干净、**动作真的调到官方服务而非空壳**、动作抛错不冒泡、不引用参考插件包名、CSS 并入共享标签、开关门控语义，以及 v0.4.20 的**删除会话全链路**（二次确认不可跳过、载荷字段逐字正确、宿主半边通道/端点常量与客户端一致、`connection.rpc.handle` 而非裸路由、可选服务确实没进 `inject`、删完不调 `archiveSession` 而调 `stopSessionActivity` + `clearMain` + `refresh`、失败不摘行、通道缺席给可读原因）。**负向对照必须真的变红**：判据改坏的方式是把源码文本改掉后重新编译沙箱（给 `env.ctxSessionRowId` 重新赋值是**无效**的——闭包内的调用走词法绑定，改不到；这一点本身就是踩过的坑）。另外，凡是「代码里不许出现 X」的断言都先**剥离注释**再比对，否则文件顶部写明「参考插件：@baihejiangnan/…」「无 MutationObserver」会把注释当代码判红。
 
 > ⚠ **测试台的一个时间陷阱（v0.4.20 踩到）**：沙箱把 `setTimeout` 注入成 `(fn) => realSetTimeout(fn, 0)`，即**立刻执行**。而 `ctxToast` 用 `window.setTimeout(..., 1800)` 清理旧提示——真实浏览器里 1800ms 远大于微任务，但沙箱里那个清理回调会和新提示挤在同一批微任务里、并且**后执行**，于是一次 `.dsh-ctx-toast` 全扫会把刚落地的「已删除…」也删掉（断言看到的是空）。**规程**：凡断言「提示文案」的地方，让出**宏任务**（`await new Promise((r) => setImmediate(r))`）而不是若干次 `await Promise.resolve()`。
 
@@ -242,9 +245,9 @@ node tools/live-smoke.mjs <URL+token>   # 真机冒烟（可选；自动探测�
   - **守住 R3**：入口 `inject` **一个字节没改**（仍是 `slots / modelDirectories / sessions / locale / workspaces`），`connection` 只在宿主半边声明，客户端照旧 `ctx.get("connection")` 可选获取；`sessionPersistence` / `sessionQuery` / `agents` / `workspaceRegistry` 全部可选 + 能力探测。旧内核上功能六照常可用，「删除会话」会给出可读原因「当前内核未提供插件通道（connection），无法删除会话；请升级内核，或改用『归档会话』」——**不静默隐藏、不拖垮 fiber**。
   - **删完不调 `archiveSession`（这一步曾是设计陷阱）**：`archiveSession` 会因 `sessionKnown` 查不到而抛错；改为 `stopSessionActivity` + （若删的是当前会话）`uiWorkspace.clearMain()` + `sessions.refresh()`。`api-session/removed` 事件只在宿主 Agent 彻底 dispose 时发，而宿主 Agent 是**懒创建**的，冷会话本就没有 Agent 可 dispose —— 所以 refresh 重拉基线才是通用解。
   - **二次确认**：点菜单项不发请求，菜单原地换成 `role="alertdialog"` 确认条，点名会话、写明不可撤销、危险按钮排最后、默认焦点在「取消」、<kbd>Esc</kbd> 可取消。断言钉死「确认前删除请求数 = 0」。
-  - **断言（`tools/check-context-menu.mjs` 109 → 152 条）**：新增 §15 整节——菜单 7 项结构与「删除会话…」位次/唯一 danger 项、二次确认全流程（取消 / Esc / 默认焦点 / 确认前零请求）、载荷字段、通道名与端点逐字正确、宿主导出常量与客户端一致、宿主用 `connection.rpc.handle` 且**没有裸 `webServer` 路由**、可选服务没进 `inject`、收尾四步、失败不摘行、通道缺席给可读原因、四个新模块作用域函数不引用 `t`（R13）。**负向对照 4 条**（收尾短路 → 重拉基线必须没发生；通道名少一位 → 静态断言必须报红；`.code` 写坏 → 提示可读必须报红；旧写法 `capture:true` 的 blur 必须报红）。
+  - **断言（`tools/check-context-menu.mjs` 109 → 155 条）**：新增 §15 整节——菜单 7 项结构与「删除会话…」位次/唯一 danger 项、二次确认全流程（取消 / Esc / 默认焦点 / 确认前零请求）、载荷字段、通道名与端点逐字正确、宿主导出常量与客户端一致、宿主用 `connection.rpc.handle` 且**没有裸 `webServer` 路由**、可选服务没进 `inject`、收尾四步、失败不摘行、通道缺席给可读原因、四个新模块作用域函数不引用 `t`（R13）；另有「宿主路由缺失 → 提示必须指向重启 DSH 而不是 405 原文」与「宿主半边确实注册了 `/ui-tools` + `sessionDelete`（不是空壳）」两条静态钉。**负向对照 5 条**（收尾短路 → 重拉基线必须没发生；通道名少一位 → 静态断言必须报红；`.code` 写坏 → 提示可读必须报红；`no-host` 判定拆掉 → 重启提示必须报红；旧写法 `capture:true` 的 blur 必须报红）。
   - **回归**：`npm run check` 全绿 —— 钩子钉 **7/7** + 座位钉 **38/38** + 右键钉 **152/152** + 漂移钉 **3/3** + compat-check **91/91** + live-smoke SKIP（需 `DSH_SMOKE_URL`+token）。
-  - **需要重装插件**：本次同时改了 `lib/client.js` 与 `lib/index.js`（宿主半边是本次新写的），刷新页面不够，须把 `lib/` 同步到 profile 的 `node_modules/dsh-ui-tools/`。
+  - **需要重装插件 + 重启 DSH**：本次同时改了 `lib/client.js` 与 `lib/index.js`（宿主半边是本次新写的），刷新页面不够 —— 须把 `lib/` 同步到 profile 的 `node_modules/dsh-ui-tools/`，然后**完全退出并重启 DSH**。宿主侧只在启动时装配一次 profile，不重启则 `/ui-tools` 通道不存在（此时菜单项仍会出现，并明确提示「请重启 DSH」，不会静默失败）。
 
 - **v0.4.19（历史）**：把「取不到认证就会静默失败」的真机冒烟链路修通，并补一处浅色主题下的**白底白字**隐患。
   - **`tools/live-smoke.mjs` 之前根本跑不起来（三处独立缺陷）**：
