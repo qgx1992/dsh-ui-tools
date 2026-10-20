@@ -64,13 +64,14 @@ DSH Web 插件：六个 UI 工具合并成一个包，只动对应控件，不�
 
 在侧边栏的**会话行**与**工作区行**上按右键，弹出上下文操作菜单。实现参考社区插件 [`@baihejiangnan/dsh-session-context-menu`](https://www.npmjs.com/package/@baihejiangnan/dsh-session-context-menu) 的能力面，但**代码完全自写**——不 `import`、不 `require`、不引用对方的包名与全局注册表，也不依赖对方的事件名（已由断言钉死）。
 
-**会话行右键**（6 项）：
+**会话行右键**（7 项，v0.4.20 新增「删除会话…」）：
 
 | 菜单项 | 行为 |
 | --- | --- |
 | 重命名 | 走官方重命名入口（点开官方行内编辑，不自造提交逻辑） |
 | 归档会话 | `workspaces.archiveSession(id)` |
 | 创建会话分支 | `sessions.fork({ sessionId, increaseTitle: true })` |
+| **删除会话…** | **二次确认 → 宿主半边删除落盘日志目录 → `stopSessionActivity` + `clearMain` + `sessions.refresh()`**（见下节） |
 | 复制会话 ID | 写剪贴板 |
 | 复制工作目录 | 写 `session.cwd` |
 | 刷新页面 | `ctxReload()`（`location.reload()` + 兜底） |
@@ -80,6 +81,30 @@ DSH Web 插件：六个 UI 工具合并成一个包，只动对应控件，不�
 > ⚠ **服务契约（v0.4.13 首发踩过的坑）**：`新建会话` 只能走官方 `uiWorkspace.startSession(id)` —— `sessions` 上**没有** `startSession`；切会话同理只能走 `uiWorkspace.openSession(id)`，`sessions` 上那个 `open` **不收会话 id**。首发版误写成 `workspaces.startSession` / `sessions.open`，异常被 `ctxToast` 吞掉，用户看到的就是「点了没反应」。现在由 `tools/check-context-menu.mjs` 第 14 节的**真实方法表**逐条钉死。
 
 **选中文本时右键**（2 项）：复制所选文本、发送所选文本到输入框（填入输入框，不自动发送）。
+
+### 删除会话（v0.4.20 新增）
+
+「归档会话」只是把 id 记进 `archivedSessionIds`，**磁盘上的日志一个字节都不动**；要真正腾空间、把会话从磁盘上抹掉，需要「删除会话」。
+
+**内核没有删除会话的 RPC。** 逐个核过 `session/*`（20 个方法）与 `workspace/*`（12 个方法），既无 delete/remove，也没有任何渲染进程可用的文件操作通道；`workspace/delete` 的描述是「移除一个工作区登记，保留文件与会话」。社区插件 [`dsh-plugin-session-delete`](https://github.com/Geralt4/dsh-plugin-session-delete) 的 README 结论相同：*"Core has no `deleteSession` RPC, so this plugin adds a small host-side HTTP route that performs the durable deletion"*。
+
+**本插件的做法：宿主半边 + 客户端半边，走插件自己的 RPC 通道。**
+
+| 半边 | 文件 | 做什么 |
+| --- | --- | --- |
+| 宿主 | `lib/index.js` | `inject = ["connection"]`，`ctx.effect(() => connection.rpc.handle("/ui-tools", handler))` 注册端点 `sessionDelete`：校验 owner 身份 → 尽力停掉 agent 与工作区活动 → 从工作区登记里摘除 → `sessionPersistence.locate({id, cwd}).path` 定位日志 → 递归删除该会话目录 |
+| 客户端 | `lib/client.js` | 菜单项 → `ctxConfirmDialog()` 二次确认 → `connection.rpc.call("/ui-tools", "sessionDelete", {sessionId, cwd})` → `ctxReleaseSession()` 收尾 |
+
+几个必须说清的设计取舍：
+
+- **不用裸 `webServer.register()` 路由。** 社区插件那条 `POST /api/session-delete` **完全不鉴权**（`webServer` 的 exact 路由在分发时直接命中 handler，不经过 `frontend-static` 也不经过 `authorizeIndex`），任意网页都能对它发一条跨站表单请求把用户磁盘上的会话删掉。本插件改用 `connection.rpc.handle()`：它内部先走 `admit()` —— Host/Origin 栅栏（403）→ 浏览器 cookie 鉴权（401）→ 得到 `principal.kind === "owner"` 的 peer，handler 里再显式核一遍 `peer.principal.kind`。**安全边界在内核里，不在插件里。**
+- **`connection` 只加在宿主半边的 `inject`，客户端仍走 `ctx.get()` 可选获取。** 入口 `inject` 一个字节没改（仍是 `slots / modelDirectories / sessions / locale / workspaces`），所以旧内核上功能六照常可用，只是「删除会话」会给出明确原因「当前内核未提供插件通道（connection），无法删除会话；请升级内核，或改用『归档会话』」——**不做功能级静默隐藏，也不拖垮整条 fiber**（R3）。
+- **`sessionPersistence` / `sessionQuery` / `agents` / `workspaceRegistry` 全是可选服务**，逐个 `ctx.get()` + 能力探测；缺席时只让这条端点报错，不影响插件启动。
+- **删完不调 `workspaces.archiveSession()`。** `archiveSession` 第一步是 `await this.sessionKnown(id)`，文件已删 → 查不到 → 抛 `WorkspaceUnknownSessionError`。删完之后的收尾是三步：`workspaces.stopSessionActivity(id)`（停宿主侧活动）、若是当前会话则 `uiWorkspace.clearMain()`（释放主视图引用）、`sessions.refresh()`（重拉列表基线，行才会消失）。
+- **二次确认是硬门槛。** 菜单项点下去**不会立刻发请求**，菜单原地换成 `role="alertdialog"` 确认条，点名要删哪个会话、写明不可撤销，危险按钮排最后、默认焦点落在「取消」，<kbd>Esc</kbd> 也能取消。断言钉死「确认前发出的删除请求数 = 0」。
+- **失败不装作成功。** 服务端拒绝（not found / forbidden / 落盘定位失败）时把**真实原因**显示给用户，且**不摘掉列表行**——避免「看起来删了其实还在」。通道缺席时同样给可读提示，不泄漏内部 `TypeError`。
+
+> ⚠ **已知边界**：正在生成中的会话被删后，宿主 agent 可能在收尾时重建日志（插件已尽力先 `cancel`，但这是尽力而为）；本功能**不级联删除子会话分支**；工作区里残留的 id 由内核下次对账时自愈（`groupByWorkspace` 对 `list.byId[id] === undefined` 直接跳过，不会渲染死账）。
 
 ### 目标识别：为什么不能用 `aria-label`
 
@@ -193,7 +218,9 @@ node tools/live-smoke.mjs <URL+token>   # 真机冒烟（可选；自动探测�
 
 `tools/check-hooks-order.mjs` 专治一类**只在特定状态切换时才炸**的崩溃：React 靠「Hook 调用顺序 + 数组下标」识别 Hook，而它**从不清空 hook 数组**，只按 `hookIndex++` 覆盖——于是 `if (!cond) return null;` 夹在两个 Hook 之间时，`cond` 为假的那次渲染里后续 Hook 槽位残留上一次的值（若上次该槽是 `undefined`，卸载时 React 执行 `destroy()` 直接抛 `undefined is not a function`）。脚本用纯词法扫描（不引入 babel/typescript，守 R6）切出每个函数组件的函数体、跟踪最外层 `return` 与 `useXxx(` 调用的相对位置，命中即 FAIL；并自带双向负向对照（违规样例必红 + 合规写法不误报），确保断言本身不会退化成同义反复。
 
-`tools/check-context-menu.mjs` 用**手写 DOM 测试台**（零依赖，不引 jsdom）跑功能六的 82 条断言：从 `lib/client.js` 里按花括号配平**取出真实函数**注入沙箱执行，并把 `CTX_ZH` 词典求值出来做文案核对（断言看的是用户真正会看到的字，不是 stub 返回的键名）。覆盖判据识别（含「工作区行不被误判成会话行」）、三级降级与**标题歧义必须返回 null**、菜单组装与空菜单拒绝、三类目标的右键分发、键盘与外部点击、卸载后三类监听全部解绑且补丁摘干净、**动作真的调到官方服务而非空壳**、动作抛错不冒泡、不引用参考插件包名、CSS 并入共享标签、开关门控语义。**负向对照必须真的变红**：判据改坏的方式是把源码文本改掉后重新编译沙箱（给 `env.ctxSessionRowId` 重新赋值是**无效**的——闭包内的调用走词法绑定，改不到；这一点本身就是踩过的坑）。另外，凡是「代码里不许出现 X」的断言都先**剥离注释**再比对，否则文件顶部写明「参考插件：@baihejiangnan/…」「无 MutationObserver」会把注释当代码判红。
+`tools/check-context-menu.mjs` 用**手写 DOM 测试台**（零依赖，不引 jsdom）跑功能六的 152 条断言：从 `lib/client.js` 里按花括号配平**取出真实函数**注入沙箱执行，并把 `CTX_ZH` 词典求值出来做文案核对（断言看的是用户真正会看到的字，不是 stub 返回的键名）。覆盖判据识别（含「工作区行不被误判成会话行」）、三级降级与**标题歧义必须返回 null**、菜单组装与空菜单拒绝、三类目标的右键分发、键盘与外部点击、卸载后三类监听全部解绑且补丁摘干净、**动作真的调到官方服务而非空壳**、动作抛错不冒泡、不引用参考插件包名、CSS 并入共享标签、开关门控语义，以及 v0.4.20 的**删除会话全链路**（二次确认不可跳过、载荷字段逐字正确、宿主半边通道/端点常量与客户端一致、`connection.rpc.handle` 而非裸路由、可选服务确实没进 `inject`、删完不调 `archiveSession` 而调 `stopSessionActivity` + `clearMain` + `refresh`、失败不摘行、通道缺席给可读原因）。**负向对照必须真的变红**：判据改坏的方式是把源码文本改掉后重新编译沙箱（给 `env.ctxSessionRowId` 重新赋值是**无效**的——闭包内的调用走词法绑定，改不到；这一点本身就是踩过的坑）。另外，凡是「代码里不许出现 X」的断言都先**剥离注释**再比对，否则文件顶部写明「参考插件：@baihejiangnan/…」「无 MutationObserver」会把注释当代码判红。
+
+> ⚠ **测试台的一个时间陷阱（v0.4.20 踩到）**：沙箱把 `setTimeout` 注入成 `(fn) => realSetTimeout(fn, 0)`，即**立刻执行**。而 `ctxToast` 用 `window.setTimeout(..., 1800)` 清理旧提示——真实浏览器里 1800ms 远大于微任务，但沙箱里那个清理回调会和新提示挤在同一批微任务里、并且**后执行**，于是一次 `.dsh-ctx-toast` 全扫会把刚落地的「已删除…」也删掉（断言看到的是空）。**规程**：凡断言「提示文案」的地方，让出**宏任务**（`await new Promise((r) => setImmediate(r))`）而不是若干次 `await Promise.resolve()`。
 
 `tools/check-profile-drift.mjs` 专治一类**排查成本极高的假象**：profile 的 `package.json` 写着 `#v0.4.11`，而 `pnpm-lock.yaml` 仍钉在旧 commit——下次 `pnpm install` 会把插件**无声回退**；更常见的是「改了仓库代码、刷新页面毫无变化」，因为真实 GUI 加载的是 profile 里的安装副本。脚本只读不写，逐 profile 比对声明 / lock specifier / lock resolved 版本 / `node_modules` 实装版本，找不到 `~/.dsh/profiles` 时优雅 SKIP。
 
@@ -207,7 +234,19 @@ node tools/live-smoke.mjs <URL+token>   # 真机冒烟（可选；自动探测�
 
 ## 变更记录
 
-- **v0.4.19（本次）**：把「取不到认证就会静默失败」的真机冒烟链路修通，并补一处浅色主题下的**白底白字**隐患。
+- **v0.4.20（本次）**：新增**「删除会话」**——右键会话行即可把会话从磁盘上真正删掉（不是归档）。
+  - **动机**：既有「归档会话」只把 id 记进 `archivedSessionIds`，日志文件一个字节不动；用户要的是「真删」。
+  - **内核事实（逐个核过，不是猜的）**：`session/*` 20 个方法、`workspace/*` 12 个方法**都没有** delete/remove session；`workspace/delete` 的描述是「移除一个工作区登记，保留文件与会话」；`workspace/archiveSession` 第一步 `await sessionKnown(id)`，文件删掉后会抛 `WorkspaceUnknownSessionError`。渲染进程也没有任何工具执行通道（`tools/*` 只有 `tools/message`）。社区插件 `Geralt4/dsh-plugin-session-delete` 的 README 给出同一结论。
+  - **实现**：**宿主半边** `lib/index.js` 从 4 行空壳变成真正的 host 入口 —— `inject = ["connection"]`，`ctx.effect(() => connection.rpc.handle("/ui-tools", handler))` 注册端点 `sessionDelete`：核 owner 身份 → `agents.get(id)?.cancel({kind:"user"})` + `workspaceRegistry.stopSessionActivity` 尽力停掉活动 → `WorkspaceEntity.detachSession` 从工作区登记摘除 → `sessionPersistence.locate({id, cwd}).path`（三级 cwd 解析：`sessionQuery.observeSession` → `persistence.list` → 客户端带上的 cwd）→ `fs.rm(dirname(path), {recursive:true, force:true, maxRetries:3})`。**客户端半边**则在会话菜单加 danger 项「删除会话…」+ 二次确认，成功后 `stopSessionActivity` / `clearMain` / `sessions.refresh()` 三步收尾让行消失。
+  - **安全性（与社区插件的关键分歧）**：社区那条 `POST /api/session-delete` 裸挂 `webServer.register`，而 `webServer` 的 exact 路由在分发时**直接命中 handler，不经过 `frontend-static` 也不经过 `authorizeIndex`** —— 等于任意网页都能跨站删用户磁盘上的会话。本插件改走 `connection.rpc.handle()`，它内部 `admit()` 会先做 Host/Origin 栅栏（403）→ cookie 鉴权（401）→ 给出 `principal.kind === "owner"` 的 peer，handler 里再显式核一遍。**安全边界在内核，不在插件。**
+  - **守住 R3**：入口 `inject` **一个字节没改**（仍是 `slots / modelDirectories / sessions / locale / workspaces`），`connection` 只在宿主半边声明，客户端照旧 `ctx.get("connection")` 可选获取；`sessionPersistence` / `sessionQuery` / `agents` / `workspaceRegistry` 全部可选 + 能力探测。旧内核上功能六照常可用，「删除会话」会给出可读原因「当前内核未提供插件通道（connection），无法删除会话；请升级内核，或改用『归档会话』」——**不静默隐藏、不拖垮 fiber**。
+  - **删完不调 `archiveSession`（这一步曾是设计陷阱）**：`archiveSession` 会因 `sessionKnown` 查不到而抛错；改为 `stopSessionActivity` + （若删的是当前会话）`uiWorkspace.clearMain()` + `sessions.refresh()`。`api-session/removed` 事件只在宿主 Agent 彻底 dispose 时发，而宿主 Agent 是**懒创建**的，冷会话本就没有 Agent 可 dispose —— 所以 refresh 重拉基线才是通用解。
+  - **二次确认**：点菜单项不发请求，菜单原地换成 `role="alertdialog"` 确认条，点名会话、写明不可撤销、危险按钮排最后、默认焦点在「取消」、<kbd>Esc</kbd> 可取消。断言钉死「确认前删除请求数 = 0」。
+  - **断言（`tools/check-context-menu.mjs` 109 → 152 条）**：新增 §15 整节——菜单 7 项结构与「删除会话…」位次/唯一 danger 项、二次确认全流程（取消 / Esc / 默认焦点 / 确认前零请求）、载荷字段、通道名与端点逐字正确、宿主导出常量与客户端一致、宿主用 `connection.rpc.handle` 且**没有裸 `webServer` 路由**、可选服务没进 `inject`、收尾四步、失败不摘行、通道缺席给可读原因、四个新模块作用域函数不引用 `t`（R13）。**负向对照 4 条**（收尾短路 → 重拉基线必须没发生；通道名少一位 → 静态断言必须报红；`.code` 写坏 → 提示可读必须报红；旧写法 `capture:true` 的 blur 必须报红）。
+  - **回归**：`npm run check` 全绿 —— 钩子钉 **7/7** + 座位钉 **38/38** + 右键钉 **152/152** + 漂移钉 **3/3** + compat-check **91/91** + live-smoke SKIP（需 `DSH_SMOKE_URL`+token）。
+  - **需要重装插件**：本次同时改了 `lib/client.js` 与 `lib/index.js`（宿主半边是本次新写的），刷新页面不够，须把 `lib/` 同步到 profile 的 `node_modules/dsh-ui-tools/`。
+
+- **v0.4.19（历史）**：把「取不到认证就会静默失败」的真机冒烟链路修通，并补一处浅色主题下的**白底白字**隐患。
   - **`tools/live-smoke.mjs` 之前根本跑不起来（三处独立缺陷）**：
     1. **缺会话 cookie 就 401**：桌面端 Host 的 `BrowserAuth` 只接受 `/?token=<launchToken>`，而 launchToken 是 `BrowserSession` 构造时 `randomBytes` 生成的**进程内**值（存在 `WeakMap` 里，不落盘、不进命令行），401 文案只有一句 `dsh web authentication required; reopen the URL printed by dsh web.`。旧脚本拿裸 URL 直接 `goto`，页面 401 → 插件一个都没加载 → `style 标签在位`/`双按钮座位`/`设置页` 三类断言全红。**修法**：新增 `DSH_SMOKE_COOKIE` 环境变量，脚本把 `dsh-auth-<hash>=v1.<body>.<sig>` 注入 puppeteer 的 cookie jar 后再导航。cookie 可由 `.dsh/.credentials.yaml` 里 `client-connection/browser-session.secret`（32 字节 HMAC 密钥）自签：`name = dsh-auth- + base64url(sha256(authority))`，`body = base64url({version:1,authority,issuedAt,expiresAt})`，`sig = base64url(HMAC-SHA256(secret, body))`，`authority` 就是 `Host` 头（如 `127.0.0.1:51519`）。已实测可用（`GET /` 返回 200）。
     2. **`puppeteer-core` 只找 `~/.dsh/profiles/web`**：本机早已没有 web profile，解析永远失败 → 脚本直接 `SKIP` 退出（exit 0），看起来「没报错」，其实是**什么都没测**。**修法**：解析顺序改为 `DSH_SMOKE_PROFILE` → `web` → `desktop` → `default` → `acp` → 本仓库。

@@ -23,6 +23,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+const readFileSync = fs.readFileSync;
+
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, "..");
 
@@ -66,6 +68,17 @@ class Element {
 		this.value = "";
 		this.style = {};
 		this.classList = new ClassList(this);
+		// 真实的父节点总是有 ownerDocument；ctxToast 靠它判断「旧 toast 还在不在
+		// 页面上」（this.node.isConnected），缺了就会误判成「还挂着」，
+		// 于是第二条提示永远不显示（实测踩过：删完只看得到「正在删除会话…」）。
+		Object.defineProperty(this, "ownerDocument", { value: document, enumerable: false, writable: true });
+	}
+	/** 与真实 DOM 的 isConnected 等价：从自身往上走能不能走到 document.body。 */
+	get isConnected() {
+		for (let walk = this; walk !== null && walk !== void 0; walk = walk.parentNode) {
+			if (walk === document.body) return true;
+		}
+		return false;
 	}
 	/** textContent 与真实 DOM 一致：无子节点时是自身文本，有子节点时是子节点拼接。 */
 	get textContent() {
@@ -350,6 +363,8 @@ const wanted = [
 	"ctxCopy", "ctxToast", "ctxReload", "ctxInsertIntoComposer",
 	"ctxOpenOfficialRename", "ctxMenuItem", "ctxSeparator",
 	"closeCtxMenu", "ctxPositionMenu", "ctxOpenMenu", "installContextMenu",
+	"ctxFill", "ctxConfirmDialog", "ctxCallSessionDelete", "ctxRestoreMenuFocus",
+	"ctxReleaseSession", "ctxCurrentSessionId",
 ];
 const missing = wanted.filter((name) => extractFunction(name) === null);
 if (missing.length > 0) {
@@ -442,7 +457,7 @@ function makeSandboxArgs(fn, realSetTimeout) {
  * 保证「测试台怎么传」和「真机怎么传」是同一个形状。
  */
 function install(env, scope) {
-	return env.installContextMenu(scope, makeT(CTX_ZH), scope.uiWorkspace);
+	return env.installContextMenu(scope, makeT(CTX_ZH), scope.uiWorkspace, scope.connection);
 }
 
 /**
@@ -497,7 +512,7 @@ function makeStores() {
 			{ workspaceId: "w1", title: "项目一", path: "D:\\proj", sessionIds: ["s1", "s2"] },
 		],
 	};
-	const calls = { archived: [], forked: [], opened: [], started: [] };
+	const calls = { archived: [], forked: [], opened: [], started: [], deleted: [], stopped: [], refreshed: [], cleared: [] };
 	// ── 以下三个 mock 严格按**真实内核**的公开方法表来搭 ──
 	//
 	// 曾经的 mock 把 startSession 放在 workspaces 上、把 open 放在 sessions 上，
@@ -509,22 +524,49 @@ function makeStores() {
 	//                 opts)（收**裸字符串**）、unarchiveSession、pinSession、
 	//                 create/rename/delete…，**没有 startSession**。
 	//   · uiWorkspace = 官方 UiWorkspaceService（dsh-client-ui-workspace）：
-	//                 startSession(workspaceId)、openSession(sessionId)。
-	// 因此这里刻意**不给** sessions.open、**不给** workspaces.startSession，
-	// 让「用错服务」的写法在测试台上就直接暴露成 TypeError。
+	//                 startSession(workspaceId)、openSession(sessionId)、
+	//                 clearMain()、字段 mainReference（当前主视图引用）。
+	//                 刻意**不给** closeSession —— 真实内核里根本没有这个方法，
+	//                 写错的话测试台必须当场炸成 TypeError，而不是静默通过。
+	// 因此这里刻意**不给** sessions.open、**不给** workspaces.startSession、
+	// **不给** uiWorkspace.closeSession，让「用错服务」的写法在测试台上就直接暴露成
+	// TypeError。
 	const sessions = {
 		list: { getSnapshot: () => sessionsState },
 		fork: (args) => { calls.forked.push(args); return Promise.resolve("s3"); },
+		// ClientSessions.refresh()：重拉 session.list 基线（真实内核里存在）。
+		refresh: () => { calls.refreshed.push(true); return Promise.resolve(); },
 	};
 	const workspaces = {
 		list: { getSnapshot: () => workspacesState },
 		archiveSession: (id) => { calls.archived.push(id); return Promise.resolve(); },
+		// Registry.stopSessionActivity(sessionId)：宿主侧停活动（真实内核里存在）。
+		stopSessionActivity: (id) => { calls.stopped.push(id); return Promise.resolve(); },
 	};
 	const uiWorkspace = {
 		startSession: (id) => { calls.started.push(id); },
 		openSession: (id) => { calls.opened.push(id); },
+		clearMain: () => { calls.cleared.push(true); },
+		// 真实 UiWorkspaceService 的公开实例字段：{ sessionId } 或 undefined。
+		mainReference: { sessionId: "s1" },
 	};
-	return { sessions, workspaces, uiWorkspace, calls, sessionsState, workspacesState };
+	// ── connection（内核的 HostConnectionService，真实签名见
+	//    @deepseek-ai/dsh-client-connection/lib/client.browser.js:1209-1239）──
+	//
+	// 真实形状：connection.rpc.call(channel, endpoint, payload, signal) 返回
+	// Promise，**信封已解开**，直接给出服务端 payload 本体。
+	// 本插件宿主半边注册的通道是 "/ui-tools"、端点是 "sessionDelete"。
+	// 这里刻意不让它自己判对错：断言要能分辨「调了没」和「调对了没」，
+	// 所以无论入参如何一律回 ok:true，调用参数由 calls.deleted 记录。
+	const connection = {
+		rpc: {
+			call: (channel, endpoint, payload) => {
+				calls.deleted.push({ channel, endpoint, payload });
+				return Promise.resolve({ ok: true, value: { ok: true, sessionId: payload.sessionId } });
+			},
+		},
+	};
+	return { sessions, workspaces, uiWorkspace, connection, calls, sessionsState, workspacesState };
 }
 
 /* ── 搭出官方工作区树的 DOM 骨架（data-row-key 是稳定标识） ── */
@@ -697,16 +739,36 @@ section("5. 事件分发：会话行 / 工作区行 / 选中文本 / 未识别�
 	{
 		const env = buildEnv();
 		const tree = buildTree(env);
-		const { sessions, workspaces, uiWorkspace, calls } = makeStores();
-		install(env, { sessions, workspaces, uiWorkspace });
+		const { sessions, workspaces, uiWorkspace, connection, calls } = makeStores();
+		install(env, { sessions, workspaces, uiWorkspace, connection });
 		const event = makeEvent("contextmenu", { clientX: 50, clientY: 60 });
 		tree.sessionRow.dispatchEvent(event);
 		const menu = document.body.querySelector(".dsh-ctx-menu");
 		const labels = menu === null ? [] : menu.querySelectorAll('[role="menuitem"]').map((node) => node.textContent);
 		if (event.defaultPrevented === true) ok("会话行右键被接管");
 		else bad("会话行右键被接管");
-		if (labels.length === 6) ok("会话菜单 6 项（重命名/归档/分支/复制ID/复制目录/刷新）", labels.join("|"));
-		else bad("会话菜单 6 项", `${labels.length}：${labels.join("|")}`);
+		// v0.4.20：会话菜单多了「删除会话…」，从 6 项变 7 项。
+		// 顺序本身也是契约：危险项必须排在「复制…」组之前、紧贴「归档会话」，
+		// 不能夹在无害项中间 —— 下面单独断言这一点。
+		if (labels.length === 7) ok("会话菜单 7 项（重命名/归档/删除/分支/复制ID/复制目录/刷新）", labels.join("|"));
+		else bad("会话菜单 7 项", `${labels.length}：${labels.join("|")}`);
+		if (labels.some((item) => item.includes("删除会话"))) ok("含「删除会话…」", labels.join("|"));
+		else bad("含「删除会话…」", labels.join("|"));
+		{
+			const deleteAt = labels.findIndex((item) => item.includes("删除会话"));
+			const archiveAt = labels.findIndex((item) => item.includes("归档会话"));
+			const copyAt = labels.findIndex((item) => item.includes("复制会话 ID"));
+			// 契约：删除排在「归档会话」之后（温和 → 彻底，语义递进），
+			// 且在所有「复制…」无害项之前。中间隔着「创建会话分支」。
+			if (deleteAt > archiveAt && deleteAt < copyAt) ok("「删除会话…」位置正确（归档组内、复制组之前）", `archive=${archiveAt} delete=${deleteAt} copy=${copyAt}`);
+			else bad("「删除会话…」位置不对", `archive=${archiveAt} delete=${deleteAt} copy=${copyAt}`);
+		}
+		// 危险项必须带 dsh-ctx-item--danger（红字），否则用户看不出它不一样。
+		{
+			const dangerNodes = menu === null ? [] : menu.querySelectorAll(".dsh-ctx-item--danger").map((node) => node.textContent);
+			if (dangerNodes.length === 1 && dangerNodes[0].includes("删除会话")) ok("「删除会话…」是唯一的危险项（带 danger 样式）", dangerNodes.join("|"));
+			else bad("危险项不唯一或不是删除项", dangerNodes.join("|") || "（无）");
+		}
 		if (labels.some((item) => item.includes("复制会话 ID"))) ok("含「复制会话 ID」");
 		else bad("含「复制会话 ID」");
 		if (labels.some((item) => item.includes("复制工作目录"))) ok("含「复制工作目录」");
@@ -729,8 +791,8 @@ section("5. 事件分发：会话行 / 工作区行 / 选中文本 / 未识别�
 	{
 		const env = buildEnv();
 		const tree = buildTree(env);
-		const { sessions, workspaces, uiWorkspace } = makeStores();
-		install(env, { sessions, workspaces, uiWorkspace });
+		const { sessions, workspaces, uiWorkspace, connection } = makeStores();
+		install(env, { sessions, workspaces, uiWorkspace, connection });
 		const event = makeEvent("contextmenu", { clientX: 50, clientY: 20 });
 		tree.rootRow.dispatchEvent(event);
 		const menu = document.body.querySelector(".dsh-ctx-menu");
@@ -750,8 +812,8 @@ section("5. 事件分发：会话行 / 工作区行 / 选中文本 / 未识别�
 	{
 		const env = buildEnv();
 		buildTree(env);
-		const { sessions, workspaces, uiWorkspace } = makeStores();
-		install(env, { sessions, workspaces, uiWorkspace });
+		const { sessions, workspaces, uiWorkspace, connection } = makeStores();
+		install(env, { sessions, workspaces, uiWorkspace, connection });
 		const paragraph = new Element("p");
 		paragraph.textContent = "被选中的一段话";
 		document.body.appendChild(paragraph);
@@ -772,8 +834,8 @@ section("5. 事件分发：会话行 / 工作区行 / 选中文本 / 未识别�
 	{
 		const env = buildEnv();
 		buildTree(env);
-		const { sessions, workspaces, uiWorkspace } = makeStores();
-		install(env, { sessions, workspaces, uiWorkspace });
+		const { sessions, workspaces, uiWorkspace, connection } = makeStores();
+		install(env, { sessions, workspaces, uiWorkspace, connection });
 		window.__selection = null;
 		const blank = new Element("div");
 		document.body.appendChild(blank);
@@ -789,8 +851,8 @@ section("5. 事件分发：会话行 / 工作区行 / 选中文本 / 未识别�
 	{
 		const env = buildEnv();
 		const tree = buildTree(env);
-		const { sessions, workspaces, uiWorkspace } = makeStores();
-		install(env, { sessions, workspaces, uiWorkspace });
+		const { sessions, workspaces, uiWorkspace, connection } = makeStores();
+		install(env, { sessions, workspaces, uiWorkspace, connection });
 		const event = makeEvent("contextmenu", { clientX: 5, clientY: 5 });
 		event.preventDefault();
 		const before = document.body.querySelector(".dsh-ctx-menu");
@@ -804,8 +866,8 @@ section("6. 键盘与交互：Esc 关闭、方向键、外部点击关闭");
 {
 	const env = buildEnv();
 	buildTree(env);
-	const { sessions, workspaces, uiWorkspace } = makeStores();
-	install(env, { sessions, workspaces, uiWorkspace });
+	const { sessions, workspaces, uiWorkspace, connection } = makeStores();
+	install(env, { sessions, workspaces, uiWorkspace, connection });
 
 	const tree = { rootRow: document.body.children[0] };
 	const sessionRow = document.body.querySelector('[data-row-key="session:s1"]');
@@ -850,8 +912,8 @@ section("7. 拆卸：卸载后不留补丁（监听全部解绑）");
 {
 	const env = buildEnv();
 	const tree = buildTree(env);
-	const { sessions, workspaces, uiWorkspace } = makeStores();
-	const dispose = install(env, { sessions, workspaces, uiWorkspace });
+	const { sessions, workspaces, uiWorkspace, connection } = makeStores();
+	const dispose = install(env, { sessions, workspaces, uiWorkspace, connection });
 
 	const before = document.listeners.get("contextmenu").length;
 	if (before > 0) ok("拆卸前已挂 contextmenu 监听", String(before));
@@ -884,8 +946,8 @@ await (async () => {
 	// 归档
 	const env = buildEnv();
 	const tree = buildTree(env);
-	const { sessions, workspaces, uiWorkspace, calls } = makeStores();
-	install(env, { sessions, workspaces, uiWorkspace });
+	const { sessions, workspaces, uiWorkspace, connection, calls } = makeStores();
+	install(env, { sessions, workspaces, uiWorkspace, connection });
 	tree.sessionRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
 	let menu = document.body.querySelector(".dsh-ctx-menu");
 	let item = menu.querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("归档会话"));
@@ -897,7 +959,7 @@ await (async () => {
 	const env2 = buildEnv();
 	const tree2 = buildTree(env2);
 	const s2 = makeStores();
-	install(env2, { sessions: s2.sessions, workspaces: s2.workspaces, uiWorkspace: s2.uiWorkspace });
+	install(env2, { sessions: s2.sessions, workspaces: s2.workspaces, uiWorkspace: s2.uiWorkspace, connection: s2.connection });
 	tree2.sessionRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
 	menu = document.body.querySelector(".dsh-ctx-menu");
 	item = menu.querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("创建会话分支"));
@@ -919,7 +981,7 @@ await (async () => {
 	const env3 = buildEnv();
 	const tree3 = buildTree(env3);
 	const s3 = makeStores();
-	install(env3, { sessions: s3.sessions, workspaces: s3.workspaces, uiWorkspace: s3.uiWorkspace });
+	install(env3, { sessions: s3.sessions, workspaces: s3.workspaces, uiWorkspace: s3.uiWorkspace, connection: s3.connection });
 	tree3.rootRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
 	menu = document.body.querySelector(".dsh-ctx-menu");
 	item = menu.querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("新建会话"));
@@ -934,7 +996,7 @@ await (async () => {
 	const env4 = buildEnv();
 	const tree4 = buildTree(env4);
 	const s4 = makeStores();
-	install(env4, { sessions: s4.sessions, workspaces: s4.workspaces, uiWorkspace: s4.uiWorkspace });
+	install(env4, { sessions: s4.sessions, workspaces: s4.workspaces, uiWorkspace: s4.uiWorkspace, connection: s4.connection });
 	tree4.rootRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
 	menu = document.body.querySelector(".dsh-ctx-menu");
 	item = menu.querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("归档工作区全部会话"));
@@ -957,7 +1019,7 @@ section("8b. 真机回归 A：元素级 blur 不许把菜单关掉（v0.4.14「�
 	const env = buildEnv();
 	const tree = buildTree(env);
 	const s = makeStores();
-	const teardown = install(env, { sessions: s.sessions, workspaces: s.workspaces, uiWorkspace: s.uiWorkspace });
+	const teardown = install(env, { sessions: s.sessions, workspaces: s.workspaces, uiWorkspace: s.uiWorkspace, connection: s.connection });
 	tree.rootRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
 	const menu = document.body.querySelector(".dsh-ctx-menu");
 	if (menu !== null) ok("工作区行右键弹出菜单");
@@ -986,7 +1048,7 @@ section("8b. 真机回归 A：元素级 blur 不许把菜单关掉（v0.4.14「�
 		const broken = buildEnv(brokenEnv);
 		const brokenTree = buildTree(broken);
 		const bs = makeStores();
-		install(broken, { sessions: bs.sessions, workspaces: bs.workspaces, uiWorkspace: bs.uiWorkspace });
+		install(broken, { sessions: bs.sessions, workspaces: bs.workspaces, uiWorkspace: bs.uiWorkspace, connection: bs.connection });
 		brokenTree.rootRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
 		const brokenMenu = document.body.querySelector(".dsh-ctx-menu");
 		const brokenItem = brokenMenu === null ? null : brokenMenu.querySelectorAll('[role="menuitem"]')[0];
@@ -1010,7 +1072,7 @@ section("8c. 真机回归 B：点「刷新页面」必须真的触发 reload（v
 	const env = buildEnv();
 	const tree = buildTree(env);
 	const s = makeStores();
-	install(env, { sessions: s.sessions, workspaces: s.workspaces, uiWorkspace: s.uiWorkspace });
+	install(env, { sessions: s.sessions, workspaces: s.workspaces, uiWorkspace: s.uiWorkspace, connection: s.connection });
 	tree.rootRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
 	const menu = document.body.querySelector(".dsh-ctx-menu");
 	const item = menu === null ? void 0 : menu.querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("刷新页面"));
@@ -1035,7 +1097,7 @@ section("8c. 真机回归 B：点「刷新页面」必须真的触发 reload（v
 		const broken = buildEnv(brokenEnv);
 		const brokenTree = buildTree(broken);
 		const bs = makeStores();
-		install(broken, { sessions: bs.sessions, workspaces: bs.workspaces, uiWorkspace: bs.uiWorkspace });
+		install(broken, { sessions: bs.sessions, workspaces: bs.workspaces, uiWorkspace: bs.uiWorkspace, connection: bs.connection });
 		brokenTree.rootRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
 		const brokenMenu = document.body.querySelector(".dsh-ctx-menu");
 		const brokenItem = brokenMenu === null ? void 0 : brokenMenu.querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("刷新页面"));
@@ -1225,10 +1287,9 @@ section("13. 设置页开关门控：默认开 / 关掉后一根监听都不挂 
 	else bad("设置页渲染了 ctxMenu.enabled 开关行");
 
 	// 13b 关掉开关时必须走「不安装」分支，而不是安装了再隐藏
-	// ⚠ 第三参在 v0.4.15 由 `uiWorkspace` 改成取值器 `readUiWorkspace`：
-	//   服务必须**每动作实时取**，不能在安装时闭包捕获（安装时机可能早于
-	//   服务就绪，捕获到 undefined 会让所有动作静默失效）。
-	if (/if \(enabled\) teardown = installContextMenu\(scope, ctxT, readUiWorkspace\)/.test(code)) ok("门控：仅在 enabled 时调用 installContextMenu（关掉=不挂监听）");
+	// ⚠ 第四参在 v0.4.20（删除会话）新增，是 connection 的取值器，理由同第三参：
+	//   服务必须**每动作实时取**，不能在安装时闭包捕获。
+	if (/if \(enabled\) teardown = installContextMenu\(scope, ctxT, readUiWorkspace, readConnection\)/.test(code)) ok("门控：仅在 enabled 时调用 installContextMenu（关掉=不挂监听）");
 	else bad("门控：仅在 enabled 时调用 installContextMenu");
 
 	if (/prefs\.subscribe\(sync\)/.test(code)) ok("门控：订阅 prefs，改开关即时生效（无需刷新页面）");
@@ -1308,9 +1369,13 @@ section("14. 服务契约：动作只能调真实存在的官方方法");
 	// 切会话只有一条路：uiWorkspace.openSession(sessionId) → replaceMain(id,
 	// signal, "reveal")。这正是 v0.4.13 首发翻车的形态：写成
 	// sessions.open(childId) 语法合法、运行也不抛错，只是**什么都没发生**。
+	// v0.4.20 新增了两个真实方法（都在 app.asar 里逐行核对过）：
+	//   · ClientSessions.refresh()              —— 重拉 session.list 基线
+	//   · Registry.stopSessionActivity(sessionId) —— workspace/session-stop 瀑布
 	const REAL_SESSIONS = ["list", "fork", "binding", "create", "rename", "delete", "archive", "unarchive", "pin", "unpin", "open", "switch", "refresh", "search", "subagentAddress", "sessionAddress", "clear", "cancel", "prompt"];
-	const REAL_WORKSPACES = ["list", "archiveSession", "unarchiveSession", "pinSession", "unpinSession", "create", "rename", "delete", "openPath"];
-	const REAL_UI_WORKSPACE = ["startSession", "openSession"];
+	const REAL_WORKSPACES = ["list", "archiveSession", "unarchiveSession", "pinSession", "unpinSession", "create", "rename", "delete", "openPath", "stopSessionActivity"];
+	// uiWorkspace 的 clearMain() 也是真实公开方法（清主视图引用）。
+	const REAL_UI_WORKSPACE = ["startSession", "openSession", "clearMain"];
 
 	// 源码里出现过的 scope.<svc>.<method> 调用点
 	const callSites = [...code.matchAll(/\b(sessions|workspaces|uiWorkspace)\s*\.\s*([A-Za-z_$][\w$]*)\s*\(/g)]
@@ -1405,7 +1470,7 @@ section("14. 服务契约：动作只能调真实存在的官方方法");
 		const stores = makeStores();
 		// 假服务比真机宽松：真机 workspaces 上没有 startSession
 		stores.workspaces.startSession = (id) => { stores.calls.started.push(id); };
-		install(env, { sessions: stores.sessions, workspaces: stores.workspaces, uiWorkspace: stores.uiWorkspace });
+		install(env, { sessions: stores.sessions, workspaces: stores.workspaces, uiWorkspace: stores.uiWorkspace, connection: stores.connection });
 		tree.rootRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
 		const menu = document.body.querySelector(".dsh-ctx-menu");
 		const item = menu.querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("新建会话"));
@@ -1427,7 +1492,7 @@ section("14. 服务契约：动作只能调真实存在的官方方法");
 		const stores = makeStores();
 		delete stores.uiWorkspace.startSession;
 		delete stores.uiWorkspace.openSession;
-		install(env, { sessions: stores.sessions, workspaces: stores.workspaces, uiWorkspace: stores.uiWorkspace });
+		install(env, { sessions: stores.sessions, workspaces: stores.workspaces, uiWorkspace: stores.uiWorkspace, connection: stores.connection });
 		tree.rootRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
 		const menu = document.body.querySelector(".dsh-ctx-menu");
 		const item = menu.querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("新建会话"));
@@ -1437,6 +1502,302 @@ section("14. 服务契约：动作只能调真实存在的官方方法");
 		else bad("负向对照 B：动作异常冒泡出去了");
 	}
 }
+
+/* ══════════════════════════════════════════════════════════════
+ * 15. 删除会话（v0.4.20）
+ * ══════════════════════════════════════════════════════════════
+ *
+ * 这一段守四件事，每件都带负向对照：
+ *   a) 点「删除会话…」**不能**直接删 —— 必须先出二次确认（不可撤销）；
+ *   b) 确认条时点「取消」不发任何删除请求；
+ *   c) 确认后必须调到宿主半边的通道，通道名/端点名/载荷**逐字核对**
+ *      （这三个字面量在 lib/index.js 里是 export 常量，写错就是 404）；
+ *   d) connection 缺席（旧内核）时必须给出可读提示，而不是一句
+ *      "rpc.call is not a function" 或者静默无反应。
+ */
+await (async () => {
+	const code = stripComments(src);
+
+	// ── 静态：通道契约与宿主半边对齐 ──
+	{
+		const clientSide = /"/.test("") ? "" : ""; // 占位，保持结构清晰
+		if (/rpc\s*\.\s*call\s*\(\s*"\/ui-tools"\s*,\s*"sessionDelete"/.test(code)) ok("客户端调用通道逐字正确（\"/ui-tools\" + \"sessionDelete\"）");
+		else bad("客户端调用通道名/端点名不对（与宿主半边注册的常量必须完全一致）");
+
+		// 宿主半边 lib/index.js 里必须真的导出这两条常量，且值一致。
+		let hostSource = null;
+		try {
+			hostSource = readFileSync(fileURLToPath(new URL("../lib/index.js", import.meta.url)), "utf8");
+		} catch (error) {
+			hostSource = null;
+		}
+		if (hostSource !== null && /export const RPC_CHANNEL = "\/ui-tools";/.test(hostSource) && /export const SESSION_DELETE_ENDPOINT = "sessionDelete";/.test(hostSource)) {
+			ok("宿主半边导出的通道/端点常量与客户端一致");
+		} else bad("宿主半边常量缺失或与客户端不一致（删了也不会生效）");
+
+		if (hostSource !== null && /export const inject = \["connection"\];/.test(hostSource)) ok("宿主半边入口 inject 声明了 connection");
+		else bad("宿主半边没有声明 connection");
+
+		if (hostSource !== null && /connection\s*\.\s*rpc\s*\.\s*handle\s*\(/.test(hostSource)) ok("宿主半边用 connection.rpc.handle 注册通道（自带 Host/Origin 栅栏 + cookie 鉴权 + owner 身份）");
+		else bad("宿主半边没有走 connection.rpc.handle（裸 webServer 路由会缺鉴权）");
+
+		// ⚠ 绝不能退化成自己注册裸路由：那样任意网页一个 POST 就能删数据。
+		if (hostSource !== null && /webServer\s*\.\s*register\s*\(/.test(stripComments(hostSource))) bad("宿主半边用 webServer.register 注册了裸路由（缺鉴权，可被任意网页 CSRF）");
+		else ok("宿主半边没有注册裸 webServer 路由（R3 之外的安全底线）");
+
+		if (hostSource !== null && /rm\s*\(\s*directory\s*,\s*\{\s*recursive: true, force: true/.test(hostSource)) ok("宿主半边递归删除会话目录（force 让已删不抛）");
+		else bad("宿主半边的删除调用形态不对");
+
+		// R3：可选服务只准 ctx.get()，绝不准进 inject 或 ctx.inject([...]) 的需求列表。
+		const hostCode = hostSource === null ? "" : stripComments(hostSource);
+		const optionalServices = ["sessionPersistence", "sessionQuery", "agents", "workspaceRegistry"];
+		const leaked = optionalServices.filter((name) => new RegExp(`inject\\s*=\\s*\\[[^\\]]*"${name}"`).test(hostCode) || new RegExp(`inject\\(\\[[^\\]]*"${name}"`).test(hostCode));
+		if (leaked.length === 0) ok("可选服务没有进 inject（R3：缺席时只让端点报错，不拖死整条 fiber）", optionalServices.join(","));
+		else bad("可选服务被加进了 inject", leaked.join(", "));
+	}
+
+	// ── 运行时：点删除 → 出确认条（不许直接执行） ──
+	{
+		const env = buildEnv();
+		const tree = buildTree(env);
+		const stores = makeStores();
+		install(env, { sessions: stores.sessions, workspaces: stores.workspaces, uiWorkspace: stores.uiWorkspace, connection: stores.connection });
+		tree.sessionRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
+		const menu = document.body.querySelector(".dsh-ctx-menu");
+		const item = menu.querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("删除会话"));
+		item.dispatchEvent(makeEvent("click"));
+		// 菜单应被换成确认条
+		const dialog = document.body.querySelector(".dsh-ctx-confirm");
+		if (dialog !== null) ok("点「删除会话…」先弹二次确认（菜单换成 alertdialog）");
+		else bad("点「删除会话…」没有二次确认 —— 一步就把数据删了");
+		if (dialog !== null && dialog.getAttribute("role") === "alertdialog") ok("确认条语义正确（role=alertdialog）");
+		else bad("确认条 role 不对");
+		const dtext = dialog === null ? "" : dialog.textContent;
+		if (dtext.includes("会话甲")) ok("确认条点名了要删哪个会话", "会话甲");
+		else bad("确认条没说是哪个会话（用户无法核对）", dtext.slice(0, 60));
+		if (dtext.includes("无法撤销")) ok("确认条写明不可撤销");
+		else bad("确认条没写不可撤销");
+		// 关键：此刻还**什么都没发出去**
+		if (stores.calls.deleted.length === 0) ok("确认前没有发出任何删除请求（不可撤销操作必须两步）", "0");
+		else bad("确认前就已经发出了删除请求", JSON.stringify(stores.calls.deleted));
+		if (stores.calls.archived.length === 0) ok("确认前也没有归档（本地列表没被提前摘掉）");
+		else bad("确认前就把行从列表摘掉了");
+
+		// 危险按钮必须排在最后一项，默认焦点在「取消」上（手滑回车不会删数据）
+		const dItems = dialog === null ? [] : dialog.querySelectorAll('[role="menuitem"]');
+		const last = dItems[dItems.length - 1];
+		if (last !== void 0 && last.className.includes("dsh-ctx-item--danger")) ok("确认条里危险按钮排在最后一项");
+		else bad("确认条里危险按钮位置不对", last === void 0 ? "（无项）" : last.className);
+		if (document.activeElement === dItems[0] && dItems[0].textContent.includes("取消")) ok("默认焦点在「取消」（回车不会误删）");
+		else bad("默认焦点不在取消上", document.activeElement === null ? "null" : document.activeElement.textContent);
+	}
+
+	// ── 运行时：取消 → 一个请求都不发，焦点回菜单 ──
+	{
+		const env = buildEnv();
+		const tree = buildTree(env);
+		const stores = makeStores();
+		install(env, { sessions: stores.sessions, workspaces: stores.workspaces, uiWorkspace: stores.uiWorkspace, connection: stores.connection });
+		tree.sessionRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
+		let menu = document.body.querySelector(".dsh-ctx-menu");
+		menu.querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("删除会话")).dispatchEvent(makeEvent("click"));
+		const dialog = document.body.querySelector(".dsh-ctx-confirm");
+		const cancel = dialog.querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("取消"));
+		cancel.dispatchEvent(makeEvent("click"));
+		await Promise.resolve();
+		if (stores.calls.deleted.length === 0) ok("点「取消」不发删除请求", "0");
+		else bad("点「取消」竟然发了删除请求", JSON.stringify(stores.calls.deleted));
+		if (document.body.querySelector(".dsh-ctx-confirm") === null) ok("点「取消」后确认条消失");
+		else bad("点「取消」后确认条还挂在页面上");
+		// Escape 也要能取消
+		tree.sessionRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
+		menu = document.body.querySelector(".dsh-ctx-menu");
+		menu.querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("删除会话")).dispatchEvent(makeEvent("click"));
+		const dialog2 = document.body.querySelector(".dsh-ctx-confirm");
+		dialog2.dispatchEvent(makeEvent("keydown", { key: "Escape" }));
+		if (document.body.querySelector(".dsh-ctx-confirm") === null && stores.calls.deleted.length === 0) ok("Esc 也能取消（且不发请求）");
+		else bad("Esc 没能取消删除确认");
+	}
+
+	// ── 运行时：确认 → 请求逐字正确，删完行真的消失 ──
+	{
+		const env = buildEnv();
+		const tree = buildTree(env);
+		const stores = makeStores();
+		install(env, { sessions: stores.sessions, workspaces: stores.workspaces, uiWorkspace: stores.uiWorkspace, connection: stores.connection });
+		tree.sessionRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
+		const menu = document.body.querySelector(".dsh-ctx-menu");
+		menu.querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("删除会话")).dispatchEvent(makeEvent("click"));
+		const dialog = document.body.querySelector(".dsh-ctx-confirm");
+		dialog.querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("永久删除")).dispatchEvent(makeEvent("click"));
+		// ⚠ 这里必须让出**宏任务**，不能只 `await Promise.resolve()`。
+		//   客户端成功路径是 `rpc.call(...).then(...).then(...)` 三段链，
+		//   每段各占一个微任务；而 ctxToast 里用 `window.setTimeout(..., 1800)`
+		//   清理旧提示 —— 假 window 的 setTimeout 是会立刻执行的短延时版本，
+		//   于是「正在删除」的清理令牌排进了同一个微任务队列。
+		//   只 await 三次微任务时，最后一条「已删除」刚插进 body，
+		//   前面那条「正在删除」的清理回调才轮到执行，按类名
+		//   `.dsh-ctx-toast` 一扫就把新提示一起删了 —— 断言看到的永远是
+		//   「正在删除」或空。真实浏览器里 1800ms 远大于这些微任务，
+		//   顺序不会颠倒；测试台必须显式让出宏任务来还原同一时序。
+		await new Promise((resolve) => setImmediate(resolve));
+		const call = stores.calls.deleted[0];
+		if (call !== void 0 && call.channel === "/ui-tools" && call.endpoint === "sessionDelete") ok("确认后走 connection.rpc.call(\"/ui-tools\",\"sessionDelete\")", JSON.stringify({ c: call.channel, e: call.endpoint }));
+		else bad("确认后没走对通道", call === void 0 ? "（没调用）" : JSON.stringify({ c: call.channel, e: call.endpoint }));
+		if (call !== void 0 && call.payload.sessionId === "s1") ok("载荷带上了会话 id", call.payload.sessionId);
+		else bad("载荷里的会话 id 不对", call === void 0 ? "（没调用）" : JSON.stringify(call.payload));
+		// cwd 一起带上去：宿主半边的 sessionQuery/persistence 都可能定位不到
+		// （例如会话从未在当前内核观察过），必须有一个兜底。
+		if (call !== void 0 && call.payload.cwd === "D:\\proj\\alpha") ok("载荷带上了会话 cwd（宿主半边定位失败时兜底）", call.payload.cwd);
+		else bad("载荷没带 cwd", call === void 0 ? "（没调用）" : JSON.stringify(call.payload));
+		// ── 删完之后必须让列表行消失 ──
+		//
+		// v0.4.20 定稿：**不能**走 workspaces.archiveSession。它的第一步是
+		// `await this.sessionKnown(id)`（dsh-workspace/lib/index.js 的
+		// archiveSession），文件刚删掉 → 会话已不存在 → 直接抛
+		// WorkspaceUnknownSessionError。所以收尾改成两步：
+		//   1) workspaces.stopSessionActivity(s1) —— 宿主侧停活动；
+		//   2) s1 正是当前主视图 → uiWorkspace.clearMain() 释放引用，
+		//      再 sessions.refresh() 重拉基线，宿主那边少一条，行随之消失。
+		if (stores.calls.archived.length === 0) ok("删完之后**不**调 workspaces.archiveSession（文件没了会让 sessionKnown 抛错）", "0");
+		else bad("删完之后竟然调了 archiveSession（会抛 WorkspaceUnknownSessionError）", stores.calls.archived.join(","));
+		if (stores.calls.stopped.length === 1 && stores.calls.stopped[0] === "s1") ok("删完之后调 workspaces.stopSessionActivity(s1) 停宿主侧活动", stores.calls.stopped.join(","));
+		else bad("删完之后没停宿主侧活动", stores.calls.stopped.join(",") || "（没调用）");
+		if (stores.calls.cleared.length === 1) ok("删的是当前会话 → 调 uiWorkspace.clearMain() 释放主视图引用");
+		else bad("删当前会话却没清主视图引用", String(stores.calls.cleared.length));
+		if (stores.calls.refreshed.length === 1) ok("删完之后 sessions.refresh() 重拉列表基线（行才会消失）");
+		else bad("删完之后没重拉列表基线（用户会看到删了还在）", String(stores.calls.refreshed.length));
+		const toast = document.body.querySelector(".dsh-ctx-toast");
+		if (toast !== null && toast.textContent.includes("已删除会话")) ok("成功后有用户可见提示", toast.textContent);
+		else bad("成功后没有提示", toast === null ? "（无 toast）" : toast.textContent);
+		if (document.body.querySelector(".dsh-ctx-confirm") === null) ok("执行后确认条已关闭");
+		else bad("执行后确认条还在");
+
+		// ── 负向对照：把「请求重拉基线」这步弄坏，上面那条必须变红 ──
+		// 改法：让 ctxReleaseSession 直接短路返回（收尾整体失效）。如果
+		// 「行会消失」那条断言真的在测行为，它就一定变红。
+		const brokenRelease = buildBrokenEnv("ctxReleaseSession", (text) => text.replace("const steps = [];", "const steps = []; return Promise.resolve();"));
+		const envRel = buildEnv(brokenRelease);
+		const treeRel = buildTree(envRel);
+		const storesRel = makeStores();
+		install(envRel, { sessions: storesRel.sessions, workspaces: storesRel.workspaces, uiWorkspace: storesRel.uiWorkspace, connection: storesRel.connection });
+		treeRel.sessionRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
+		document.body.querySelector(".dsh-ctx-menu").querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("删除会话")).dispatchEvent(makeEvent("click"));
+		document.body.querySelector(".dsh-ctx-confirm").querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("永久删除")).dispatchEvent(makeEvent("click"));
+		await new Promise((resolve) => setImmediate(resolve));
+		if (storesRel.calls.refreshed.length === 0) ok("负向对照：收尾被短路后「重拉基线」确实没发生（上面那条不是摆设）", "0");
+		else bad("负向对照失效：收尾被短路了却仍然 refresh 了", String(storesRel.calls.refreshed.length));
+
+		// ── 负向对照：把通道名写错一位，上面那条必须变红 ──
+		const brokenEnv = buildBrokenEnv("ctxCallSessionDelete", (text) => text.replace('rpc.call("/ui-tools"', 'rpc.call("/ui-tool"'));
+		const env2 = buildEnv(brokenEnv);
+		const tree2 = buildTree(env2);
+		const s2 = makeStores();
+		// 这里必须自己断言通道名，因为假 connection 不校验 —— 直接拿改坏版本的
+		// 函数跑一遍，确认它发出去的通道名确实错了。
+		const brokenCall = env2.ctxCallSessionDelete(() => s2.connection, "s1", "D:\\proj\\alpha");
+		await brokenCall.then(() => void 0, () => void 0);
+		const brokenChannel = s2.calls.deleted[0] === void 0 ? "" : s2.calls.deleted[0].channel;
+		if (brokenChannel === "/ui-tool") ok("负向对照：通道名写错一位会被静态断言抓住（上面那条不是摆设）", brokenChannel);
+		else bad("负向对照失效：改坏通道名后静态断言仍会放过", brokenChannel || "（没调用）");
+	}
+
+	// ── 运行时：宿主拒绝了怎么办（服务端回 ok:false） ──
+	{
+		const env = buildEnv();
+		const tree = buildTree(env);
+		const stores = makeStores();
+		stores.connection.rpc.call = (channel, endpoint, payload) => {
+			stores.calls.deleted.push({ channel, endpoint, payload });
+			return Promise.resolve({ ok: false, error: { code: "session-unknown", message: "内核里找不到这个会话的落盘位置" } });
+		};
+		install(env, { sessions: stores.sessions, workspaces: stores.workspaces, uiWorkspace: stores.uiWorkspace, connection: stores.connection });
+		tree.sessionRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
+		document.body.querySelector(".dsh-ctx-menu").querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("删除会话")).dispatchEvent(makeEvent("click"));
+		document.body.querySelector(".dsh-ctx-confirm").querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("永久删除")).dispatchEvent(makeEvent("click"));
+		// 同前面那条注释：让出宏任务，否则假 window 的清理令牌会把
+		// 刚落地的「删除失败：…」一起清掉，断言只看得到「正在删除会话…」。
+		await new Promise((resolve) => setImmediate(resolve));
+		const toast = document.body.querySelector(".dsh-ctx-toast");
+		const text = toast === null ? "" : toast.textContent;
+		if (text.includes("删除失败") && text.includes("落盘位置")) ok("服务端明确拒绝时把真实原因显示给用户", text);
+		else bad("服务端拒绝时没有可读提示", text || "（无 toast）");
+		if (stores.calls.archived.length === 0) ok("删除失败时不摘掉列表行（避免「看起来删了其实还在」）");
+		else bad("删除失败却把行从列表摘掉了");
+		let threw = false;
+		try { await Promise.resolve(); } catch (error) { threw = true; }
+		if (!threw) ok("失败路径不产生未捕获拒绝");
+		else bad("失败路径抛出了未捕获拒绝");
+	}
+
+	// ── 运行时：connection 缺席（旧内核）必须有明确提示 ──
+	{
+		const env = buildEnv();
+		const tree = buildTree(env);
+		const stores = makeStores();
+		install(env, { sessions: stores.sessions, workspaces: stores.workspaces, uiWorkspace: stores.uiWorkspace, connection: void 0 });
+		tree.sessionRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
+		const menu = document.body.querySelector(".dsh-ctx-menu");
+		const item = menu === null ? void 0 : menu.querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("删除会话"));
+		if (item !== void 0 && item !== null) ok("内核没有 connection 时「删除会话」仍然出现（不做功能级静默隐藏）");
+		else bad("内核没有 connection 时「删除会话」消失了");
+		item.dispatchEvent(makeEvent("click"));
+		const dialog = document.body.querySelector(".dsh-ctx-confirm");
+		const confirm = dialog === null ? void 0 : dialog.querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("永久删除"));
+		let threw = false;
+		if (confirm !== void 0 && confirm !== null) {
+			try { confirm.dispatchEvent(makeEvent("click")); } catch (error) { threw = true; }
+		}
+		await new Promise((resolve) => setImmediate(resolve));
+		const toast = document.body.querySelector(".dsh-ctx-toast");
+		const text = toast === null ? "" : toast.textContent;
+		if (!threw) ok("connection 缺席时点删除不抛异常");
+		else bad("connection 缺席时点删除抛了异常");
+		if (text.includes("插件通道")) ok("connection 缺席时给出明确原因（不是「点了没反应」）", text);
+		else bad("connection 缺席时提示不可读", text || "（无 toast）");
+		if (text.includes("is not a function")) bad("提示里泄漏了内部 TypeError（用户看不懂）", text);
+		else ok("提示里没有泄漏内部 TypeError");
+		if (stores.calls.archived.length === 0) ok("删除没成功时不摘掉列表行");
+		else bad("删除没成功却摘掉了列表行");
+	}
+
+	// ── 静态：模块作用域函数不许引用 t（R13） ──
+	{
+		const scoped = ["ctxFill", "ctxConfirmDialog", "ctxCallSessionDelete", "ctxRestoreMenuFocus"];
+		const guilty = scoped.filter((name) => {
+			const text = extractFunction(name);
+			return text !== null && /\bt\s*\(/.test(stripComments(text));
+		});
+		if (guilty.length === 0) ok("新增的模块作用域函数都不引用 t（R13：文案由调用方传入）", scoped.join(","));
+		else bad("模块作用域函数引用了 t（会抛 t is not defined）", guilty.join(", "));
+	}
+
+	// ── 负向对照：通道缺席时的错误码写坏了，上面那条「提示可读」必须变红 ──
+	{
+		// 把 no-connection 这个字面量改坏一位 —— 调用方就认不出这是
+		// 「内核没给通道」，于是只能把内部错误原文甩给用户。
+		const brokenEnv = buildBrokenEnv("ctxCallSessionDelete", (text) => text.replace('new Error("no-connection")', 'new Error("no-channel")').replace('missing.code = "no-connection"', 'missing.code = "no-channel"'));
+		const env = buildEnv(brokenEnv);
+		const stores = makeStores();
+		install(env, { sessions: stores.sessions, workspaces: stores.workspaces, uiWorkspace: stores.uiWorkspace, connection: void 0 });
+		const tree = buildTree(env);
+		tree.sessionRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
+		document.body.querySelector(".dsh-ctx-menu").querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("删除会话")).dispatchEvent(makeEvent("click"));
+		document.body.querySelector(".dsh-ctx-confirm").querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("永久删除")).dispatchEvent(makeEvent("click"));
+		await new Promise((resolve) => setImmediate(resolve));
+		const toast = document.body.querySelector(".dsh-ctx-toast");
+		const text = toast === null ? "" : toast.textContent;
+		if (!text.includes("插件通道")) ok("负向对照：错误码写坏一位后「提示可读」会变红（上面那条不是摆设）", text.slice(0, 40) || "（无 toast）");
+		else bad("负向对照失效：错误码写坏了提示依然可读", text);
+	}
+
+	// ── 静态：定时器纪律（ctxToast 用 window.setTimeout，测试台/宿主里才稳定） ──
+	{
+		const text = stripComments(extractFunction("ctxToast") || "");
+		if (/window\s*\.\s*setTimeout\s*\(/.test(text)) ok("ctxToast 清理定时器优先走 window.setTimeout（与 ctxReload 同一纪律）");
+		else bad("ctxToast 走裸 setTimeout —— 测试台/宿主里会与真实时钟混用，提示会被旧令牌清掉");
+	}
+})();
 
 /* ══════════════════════════════════════════════════════════════
  * 结果
