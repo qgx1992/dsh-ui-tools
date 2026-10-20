@@ -154,17 +154,33 @@ for (const profile of profiles) {
 			}
 		}
 
-		// ③ lock 里 resolved 出的 version 字段若与已装版本不符，说明 lock 被手工改过一半
-		const lockVersions = [...new Set([...versions.values()])];
-		if (lockVersions.length > 0 && installedVersion !== null) {
-			const stale = lockVersions.filter((v) => v !== installedVersion);
-			if (stale.length === 0) {
-				ok(`[${profile}] lock 记录的版本与实装一致`, `v${installedVersion}`);
-			} else {
-				bad(
-					`[${profile}] lock 记录的版本与实装不一致`,
-					`实装 v${installedVersion}；lock 记录 ${stale.map((v) => `v${v}`).join(" | ")}`
-				);
+		// ③ lock 里解析出的版本若与已装版本不符，说明 lock 被手工改过一半
+		//
+		// ⚠ 这里的判据分两种 specifier，差别是真机踩出来的：
+		//   · npm 版本号（`0.4.5`）—— packages 段的键就叫 `dsh-ui-tools@0.4.5`，
+		//     把 @ 后面的东西直接当版本读，是对的。
+		//   · GitHub 直装（`github:owner/repo#v0.4.5`）—— packages 段的键是
+		//     `dsh-ui-tools@https://codeload.github.com/…/tar.gz/<commit-sha>`，
+		//     **键里根本没有版本号**，只有 commit。此时版本真相在两处：importers
+		//     段 `version:` 的 resolved url，以及 node_modules 里那份 package.json
+		//     —— 后者已经在上面的 ① 里核过了。所以这种情况下 ③ 应当跳过，
+		//     否则就是把 commit sha 当成版本号去比，永远报「不一致」（v0.4.21 起
+		//     这个 FP 一直挂着，会盖掉真正的不一致）。
+		const isGitSpec = versions.size > 0 && [...versions.keys()].every((key) => key.includes("codeload.github.com") || key.includes("@https://") || key.includes("@github:"));
+		if (isGitSpec) {
+			ok(`[${profile}] 直装 GitHub 包：版本以 node_modules 副本为准（lock 键是 commit，不是版本号）`, `v${installedVersion}`);
+		} else {
+			const lockVersions = [...new Set([...versions.values()])];
+			if (lockVersions.length > 0 && installedVersion !== null) {
+				const stale = lockVersions.filter((v) => v !== installedVersion);
+				if (stale.length === 0) {
+					ok(`[${profile}] lock 记录的版本与实装一致`, `v${installedVersion}`);
+				} else {
+					bad(
+						`[${profile}] lock 记录的版本与实装不一致`,
+						`实装 v${installedVersion}；lock 记录 ${stale.map((v) => `v${v}`).join(" | ")}`
+					);
+				}
 			}
 		}
 	}

@@ -116,3 +116,43 @@ console.log(`[4] 带 evil Origin -> ${evil.status}（期望 403）`);
 /* ── 4. 对照组 ── */
 const ctrl = await rawRequest("POST", port, "/no-such-channel-xyz/x", { "content-type": "application/json", cookie }, "{}");
 console.log(`\n[5] 对照：POST /no-such-channel-xyz/x -> ${ctrl.status}（应当与 [2] 区分开，否则说明一切都是兜底的 405）`);
+
+/* ── 5. 批量端点（v0.4.22）：同样用绝不存在的 id，只读探针 ── */
+//
+// 批量端点走的是另一条精确路由 /api/ui-tools/sessionsDelete。它和单删端点
+// 共用同一个 handler 工厂，但**路径不同、载荷形态不同**（sessions 数组），
+// 任何一处写错都只在真机上暴露，所以单独探一次。
+const BATCH_PATH = "/api/ui-tools/sessionsDelete";
+const batchBody = JSON.stringify({ sessions: [{ sessionId: bogus, cwd: "" }, { sessionId: `${bogus}-2`, cwd: "" }] });
+const batch = await rawRequest("POST", port, BATCH_PATH, {
+  "content-type": "application/json",
+  cookie,
+  origin: `http://${authority}`
+}, batchBody);
+console.log(`\n[6] POST ${BATCH_PATH}（两个不存在的会话）-> ${batch.status}`);
+console.log(`    body: ${batch.text.slice(0, 400)}`);
+if (batch.status === 200) {
+  let parsed = null;
+  try { parsed = JSON.parse(batch.text); } catch { parsed = null; }
+  // 两个 id 都不存在 ⇒ 全失败 ⇒ ok:false 且 code 应是业务码（不是 partial）。
+  if (parsed !== null && parsed.ok === false && parsed.error?.code !== "partial") {
+    console.log("    ✅ 批量通道通了（两条都被内核判为不存在，正是预期）");
+  } else if (parsed !== null && parsed.ok === false) {
+    console.log("    ✅ 批量通道通了（回的是 partial —— 只要不是 404/405 就说明路由在）");
+  } else {
+    console.log("    ⚠ 200 但响应不是预期的 {ok:false} 信封");
+  }
+} else if (batch.status === 405) console.log("    ❌ 405 = 路由不存在（宿主半边还没重启到 v0.4.22）");
+else console.log(`    ⚠ 状态 ${batch.status}`);
+
+const batchNoCookie = await rawRequest("POST", port, BATCH_PATH, { "content-type": "application/json" }, batchBody);
+console.log(`[7] 批量端点不带 cookie -> ${batchNoCookie.status}（期望 401）`);
+const batchEvil = await rawRequest("POST", port, BATCH_PATH, {
+  "content-type": "application/json", cookie, origin: "http://evil.example.com"
+}, batchBody);
+console.log(`[8] 批量端点带 evil Origin -> ${batchEvil.status}（期望 403）`);
+const batchBad = await rawRequest("POST", port, BATCH_PATH, {
+  "content-type": "application/json", cookie, origin: `http://${authority}`
+}, JSON.stringify({ sessions: [] }));
+console.log(`[9] 批量端点传空数组 -> ${batchBad.status}（期望 400：空数组是客户端 bug，不该被当成成功）`);
+console.log(`    body: ${batchBad.text.slice(0, 200)}`);

@@ -376,7 +376,8 @@ const wanted = [
 	"ctxCopy", "ctxToast", "ctxReload", "ctxInsertIntoComposer",
 	"ctxOpenOfficialRename", "ctxMenuItem", "ctxSeparator",
 	"closeCtxMenu", "ctxPositionMenu", "ctxOpenMenu", "installContextMenu",
-	"ctxFill", "ctxConfirmDialog", "ctxDeleteUrl", "ctxCallSessionDelete", "ctxRestoreMenuFocus",
+	"ctxFill", "ctxConfirmDialog", "ctxDeleteUrl", "ctxDeleteUrlFor", "ctxPostDelete",
+	"ctxCallSessionDelete", "ctxCallSessionsDelete", "ctxSessionSummaryIndex", "ctxRestoreMenuFocus",
 	"ctxReleaseSession", "ctxCurrentSessionId",
 ];
 const missing = wanted.filter((name) => extractFunction(name) === null);
@@ -396,6 +397,7 @@ const stateEnd = src.indexOf("\n", stateAt);
 const literalAnchors = [
 	"const CTX_NS = ",
 	"const SESSION_DELETE_PATH = ",
+	"const SESSION_DELETE_BATCH_PATH = ",
 ];
 const literalBlocks = literalAnchors.map((anchor) => {
 	const at = src.indexOf(anchor);
@@ -487,11 +489,26 @@ function buildEnv(factory) {
  * `fetchCalls`，断言会拿它核对「打的地址对不对、method 对不对、body 带没带」。
  */
 const fetchCalls = [];
-const fetchRoutes = new Map([
-	["/api/ui-tools/sessionDelete", () => new Response(JSON.stringify({ ok: true, value: { ok: true } }), {
+/** 单会话删除端点的默认响应（v0.4.20 起的契约，老客户端仍在用）。 */
+const singleDeleteOk = () => new Response(JSON.stringify({ ok: true, value: { ok: true, sessionId: "s1", removed: 1 } }), {
+	status: 200,
+	headers: { "content-type": "application/json" },
+});
+/**
+ * 批量删除端点的默认响应（v0.4.22）：回显收到的 sessionId 列表，
+ * 断言才能核对「发出去的一批」与「宿主收到的一批」是同一份。
+ */
+const batchDeleteOk = (record) => {
+	const sessions = record !== void 0 && record !== null && Array.isArray(record.body?.sessions) ? record.body.sessions : [];
+	const deleted = sessions.map((entry) => String(entry.sessionId));
+	return new Response(JSON.stringify({ ok: true, value: { ok: true, deleted, removed: deleted.length } }), {
 		status: 200,
 		headers: { "content-type": "application/json" },
-	})],
+	});
+};
+const fetchRoutes = new Map([
+	["/api/ui-tools/sessionDelete", singleDeleteOk],
+	["/api/ui-tools/sessionsDelete", batchDeleteOk],
 ]);
 /**
  * @param {string} url 客户端传进来的地址（本插件一定是同源绝对地址）。
@@ -901,8 +918,14 @@ section("5. 事件分发：会话行 / 工作区行 / 选中文本 / 未识别�
 		const labels = menu === null ? [] : menu.querySelectorAll('[role="menuitem"]').map((node) => node.textContent);
 		if (event.defaultPrevented === true) ok("工作区行右键被接管");
 		else bad("工作区行右键被接管");
-		if (labels.length === 4) ok("工作区菜单 4 项（新建/复制路径/归档全部/刷新）", labels.join("|"));
-		else bad("工作区菜单 4 项", `${labels.length}：${labels.join("|")}`);
+		if (labels.length === 5) ok("工作区菜单 5 项（新建/复制路径/归档全部/删除全部/刷新）", labels.join("|"));
+		else bad("工作区菜单 5 项", `${labels.length}：${labels.join("|")}`);
+		// v0.4.22：删除项必须紧跟在归档项**之后** —— 归档是删除的温和版，两者是一对；
+		// 顺序错位（比如被塞到「新建会话」前面）会让危险项离日常项太近，这里钉死相对位置。
+		const archiveAt = labels.findIndex((item) => item.includes("归档工作区全部会话"));
+		const deleteAt = labels.findIndex((item) => item.includes("删除工作区全部会话"));
+		if (archiveAt >= 0 && deleteAt === archiveAt + 1) ok("「删除工作区全部会话」紧跟在「归档工作区全部会话」之后", `${archiveAt}->${deleteAt}`);
+		else bad("「删除工作区全部会话」紧跟在归档项之后", `archive=${archiveAt} delete=${deleteAt}`);
 		if (labels.some((item) => item.includes("复制工作区路径"))) ok("含「复制工作区路径」");
 		else bad("含「复制工作区路径」");
 		// 工作区菜单里**不应**出现会话专属项
@@ -1625,7 +1648,10 @@ await (async () => {
 		// v0.4.21：通道从 connection.rpc.handle 改成 connection.fetch.register，
 		// 客户端相应地直接 fetch 宿主的精确路由。路径字面量必须与
 		// lib/index.js 的 DELETE_ROUTE_PATH 逐字一致。
-		if (/fetch\s*\(\s*ctxDeleteUrl\s*\(\s*\)/.test(code) && /const SESSION_DELETE_PATH = "\/api\/ui-tools\/sessionDelete";/.test(code)) {
+		// v0.4.22：URL 改由 ctxDeleteUrlFor(path) 统一拼装（单删与批量删共用同源
+		// 拼接逻辑），所以静态钉改成「ctxPostDelete 里调用 ctxDeleteUrlFor(path)」+
+		// 「两条路径常量各自只写死一次」。
+		if (/fetch\s*\(\s*ctxDeleteUrlFor\s*\(\s*path\s*\)/.test(code) && /const SESSION_DELETE_PATH = "\/api\/ui-tools\/sessionDelete";/.test(code)) {
 			ok("客户端调用路径逐字正确（\"/api/ui-tools/sessionDelete\"）");
 		} else bad("客户端调用路径不对（与宿主半边注册的路由必须完全一致）");
 
@@ -1634,6 +1660,11 @@ await (async () => {
 		const literalCount = (code.match(/"\/api\/ui-tools\/sessionDelete"/g) || []).length;
 		if (literalCount === 1) ok("删除路径只在一处写死（其余全用常量/函数拼接）", String(literalCount));
 		else bad("删除路径字面量出现了多处拷贝（改一处漏一处就会 404）", String(literalCount));
+
+		// v0.4.22：批量路径同样只准写死一处，且必须与宿主常量逐字一致。
+		const batchLiteralCount = (code.match(/"\/api\/ui-tools\/sessionsDelete"/g) || []).length;
+		if (batchLiteralCount === 1) ok("批量删除路径只在一处写死", String(batchLiteralCount));
+		else bad("批量删除路径字面量出现了多处拷贝", String(batchLiteralCount));
 
 		// 宿主半边 lib/index.js 里必须真的导出这两条常量，且值一致。
 		let hostSource = null;
@@ -1645,6 +1676,10 @@ await (async () => {
 		if (hostSource !== null && /export const DELETE_ROUTE_PATH = "\/api\/ui-tools\/sessionDelete";/.test(hostSource)) {
 			ok("宿主半边导出的路由常量与客户端一致");
 		} else bad("宿主半边常量缺失或与客户端不一致（删了也不会生效）");
+
+		if (hostSource !== null && /export const DELETE_BATCH_ROUTE_PATH = "\/api\/ui-tools\/sessionsDelete";/.test(hostSource)) {
+			ok("宿主半边导出的批量路由常量与客户端一致");
+		} else bad("宿主半边批量路由常量缺失或与客户端不一致");
 
 		// 入口 inject 故意留空：Cordis 的 fiber 只要有一个 inject 服务缺席就一直
 		// 停在 INACTIVE，apply 的函数体根本不执行，且**不报错**——表现和「插件没
@@ -1667,6 +1702,17 @@ await (async () => {
 
 		if (hostSource !== null && /rpc\s*\.\s*handle\s*\(/.test(stripComments(hostSource))) bad("宿主半边又用回了 connection.rpc.handle（第三方插件不可用，必然抛 webServer inject 错误）");
 		else ok("宿主半边没有用 connection.rpc.handle（第三方插件调它必然抛错）");
+
+		// v0.4.22：批量端点必须由**同一个 handler 工厂**注册两条路由，而不是复制
+		// 一份删改。两份代码一旦分家，就会出现「删一个提示对、删一批提示错」这种
+		// 最难查的分裂。
+		if (hostSource !== null) {
+			const hostCodeForRoutes = stripComments(hostSource);
+			const registerConst = hostCodeForRoutes.search(/const\s+registerDeleteRoute\s*=/);
+			const routeCalls = (hostCodeForRoutes.match(/registerDeleteRoute\s*\(\s*DELETE_/g) || []).length;
+			if (registerConst >= 0 && routeCalls === 2) ok("单会话与批量两条路由共用同一个 handler 工厂（一次删一个 = 只含一项的批量）", String(routeCalls));
+			else bad("两条删除路由没有共用 handler 工厂", `registerAt=${registerConst} calls=${routeCalls}`);
+		}
 
 		// ⚠ 安全底线：**删除动作**绝不能走裸路由，否则任意网页一个 POST 就能删数据。
 		// 允许的唯一裸路由例外是只读诊断探针（它不接收任何输入、不改任何状态）。
@@ -1839,10 +1885,15 @@ await (async () => {
 		else bad("负向对照失效：收尾被短路了却仍然 refresh 了", String(storesRel.calls.refreshed.length));
 
 		// ── 负向对照：把请求路径写错一位，上面那条必须变红 ──
-		// v0.4.21 起路径来自模块常量 SESSION_DELETE_PATH，所以直接改坏那个常量：
+		// v0.4.22 起路径由 ctxDeleteUrlFor(path) 统一拼装（单删与批量删共用），
+		// 所以改坏这里就是「两条路由一起打错地址」，正是真机上最典型的 404。
 		// 改的是**真正驱动行为的字节**，而不是断言里的正则。
+		// ⚠ 只能改 ctxPostDelete 里的调用参数，不能只改 ctxDeleteUrlFor 末尾那条
+		//   `return path;`：测试台的 window.location.origin 有值，函数总是从
+		//   `return loc.origin + path;` 提前返回，兜底分支根本执行不到 —— 改那里
+		//   是「改了但没生效」，对照会假绿（第一版就踩了这个坑，实测确认）。
 		{
-			const brokenEnv = buildBrokenEnv("ctxDeleteUrl", (text) => text.replace("SESSION_DELETE_PATH;", "SESSION_DELETE_PATH + \"x\";"));
+			const brokenEnv = buildBrokenEnv("ctxPostDelete", (text) => text.replace("fetch(ctxDeleteUrlFor(path),", "fetch(ctxDeleteUrlFor(path) + \"x\","));
 			const envB = buildEnv(brokenEnv);
 			const sB = makeStores();
 			// ⚠ fetchCalls 是**全局共享**数组（calls.deleted 就是它），前面已经积累
@@ -2036,10 +2087,10 @@ await (async () => {
 
 	// ── 负向对照：把 404/405 → no-host 这条判定拆掉，上面那条必须变红 ──
 	{
-		// v0.4.21 起判定在 ctxCallSessionDelete 的 `if (response.status === 404 || response.status === 405)`
-		// 与末尾 `.catch` 里两处。把 status 比较改成永不命中的 -1，
+		// v0.4.22 起判定搬进了两条路由共用的 ctxPostDelete：`if (response.status === 404 || response.status === 405)`
+		// 与末尾 `.catch` 里两处。把 status 比较改成永不命中的 false，
 		// 提示就退回成「删除失败：HTTP 405」。
-		const brokenEnv = buildBrokenEnv("ctxCallSessionDelete", (text) =>
+		const brokenEnv = buildBrokenEnv("ctxPostDelete", (text) =>
 			text.replace(/response\.status === 404 \|\| response\.status === 405/g, "false")
 				.replace(/error\.status === 404 \|\| error\.status === 405/g, "false"));
 		const env = buildEnv(brokenEnv);
