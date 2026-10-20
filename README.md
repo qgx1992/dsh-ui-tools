@@ -82,33 +82,65 @@ DSH Web 插件：六个 UI 工具合并成一个包，只动对应控件，不�
 
 **选中文本时右键**（2 项）：复制所选文本、发送所选文本到输入框（填入输入框，不自动发送）。
 
-### 删除会话（v0.4.20 新增）
+### 删除会话（v0.4.20 新增；v0.4.21 改走 `connection.fetch`）
 
 「归档会话」只是把 id 记进 `archivedSessionIds`，**磁盘上的日志一个字节都不动**；要真正腾空间、把会话从磁盘上抹掉，需要「删除会话」。
 
 **内核没有删除会话的 RPC。** 逐个核过 `session/*`（20 个方法）与 `workspace/*`（12 个方法），既无 delete/remove，也没有任何渲染进程可用的文件操作通道；`workspace/delete` 的描述是「移除一个工作区登记，保留文件与会话」。社区插件 [`dsh-plugin-session-delete`](https://github.com/Geralt4/dsh-plugin-session-delete) 的 README 结论相同：*"Core has no `deleteSession` RPC, so this plugin adds a small host-side HTTP route that performs the durable deletion"*。
 
-**本插件的做法：宿主半边 + 客户端半边，走插件自己的 RPC 通道。**
+**本插件的做法：宿主半边 + 客户端半边，走内核 `connection` 服务提供的 Fetch 路由。**
 
 | 半边 | 文件 | 做什么 |
 | --- | --- | --- |
-| 宿主 | `lib/index.js` | `inject = ["connection"]`，`ctx.effect(() => connection.rpc.handle("/ui-tools", handler))` 注册端点 `sessionDelete`：校验 owner 身份 → 尽力停掉 agent 与工作区活动 → 从工作区登记里摘除 → `sessionPersistence.locate({id, cwd}).path` 定位日志 → 递归删除该会话目录 |
-| 客户端 | `lib/client.js` | 菜单项 → `ctxConfirmDialog()` 二次确认 → `connection.rpc.call("/ui-tools", "sessionDelete", {sessionId, cwd})` → `ctxReleaseSession()` 收尾 |
+| 宿主 | `lib/index.js` | 入口 `inject = []`；`ctx.inject(["connection"], scope => scope.connection.fetch.register({ path: "/api/ui-tools/sessionDelete", methods: ["POST"], requestBody: "buffered", fetch }))`：核 owner 身份 → 尽力停掉 agent 与工作区活动 → 从工作区登记里摘除 → `sessionPersistence.locate({id, cwd}).path` 定位日志 → 递归删除该会话目录 |
+| 客户端 | `lib/client.js` | 菜单项 → `ctxConfirmDialog()` 二次确认 → `fetch(ctxDeleteUrl(), {method:"POST", credentials:"same-origin", body: JSON.stringify({sessionId, cwd})})` → `ctxReleaseSession()` 收尾 |
 
 几个必须说清的设计取舍：
 
-- **不用裸 `webServer.register()` 路由。** 社区插件那条 `POST /api/session-delete` **完全不鉴权**（`webServer` 的 exact 路由在分发时直接命中 handler，不经过 `frontend-static` 也不经过 `authorizeIndex`），任意网页都能对它发一条跨站表单请求把用户磁盘上的会话删掉。本插件改用 `connection.rpc.handle()`：它内部先走 `admit()` —— Host/Origin 栅栏（403）→ 浏览器 cookie 鉴权（401）→ 得到 `principal.kind === "owner"` 的 peer，handler 里再显式核一遍 `peer.principal.kind`。**安全边界在内核里，不在插件里。**
-- **`connection` 只加在宿主半边的 `inject`，客户端仍走 `ctx.get()` 可选获取。** 入口 `inject` 一个字节没改（仍是 `slots / modelDirectories / sessions / locale / workspaces`），所以旧内核上功能六照常可用，只是「删除会话」会给出明确原因「当前内核未提供插件通道（connection），无法删除会话；请升级内核，或改用『归档会话』」——**不做功能级静默隐藏，也不拖垮整条 fiber**（R3）。
+- **不用裸 `webServer.register()` 路由。** 社区插件那条 `POST /api/session-delete` **完全不鉴权**（`webServer` 的 exact 路由在分发时直接命中 handler，不经过 `frontend-static` 也不经过 `authorizeIndex`），任意网页都能对它发一条跨站表单请求把用户磁盘上的会话删掉。本插件改走 `connection.fetch.register()`：请求先经过 `connection` 的 `/api` 共享处理器 —— Host/Origin 栅栏（403）→ 浏览器 cookie 鉴权（401）→ 得到 `principal.kind === "owner"` 的 peer，handler 里再显式核一遍 `peer.principal.kind`。**安全边界在内核里，不在插件里。**
+- **`connection` 只加在宿主半边的子 fiber，客户端仍走 `ctx.get()` 可选获取。** 入口 `inject` 一个字节没改（仍是 `slots / modelDirectories / sessions / locale / workspaces`），所以旧内核上功能六照常可用，只是「删除会话」会给出明确原因「当前内核未提供插件通道（connection），无法删除会话；请升级内核，或改用『归档会话』」——**不做功能级静默隐藏，也不拖垮整条 fiber**（R3）。
 - **`sessionPersistence` / `sessionQuery` / `agents` / `workspaceRegistry` 全是可选服务**，逐个 `ctx.get()` + 能力探测；缺席时只让这条端点报错，不影响插件启动。
 - **删完不调 `workspaces.archiveSession()`。** `archiveSession` 第一步是 `await this.sessionKnown(id)`，文件已删 → 查不到 → 抛 `WorkspaceUnknownSessionError`。删完之后的收尾是三步：`workspaces.stopSessionActivity(id)`（停宿主侧活动）、若是当前会话则 `uiWorkspace.clearMain()`（释放主视图引用）、`sessions.refresh()`（重拉列表基线，行才会消失）。
 - **二次确认是硬门槛。** 菜单项点下去**不会立刻发请求**，菜单原地换成 `role="alertdialog"` 确认条，点名要删哪个会话、写明不可撤销，危险按钮排最后、默认焦点落在「取消」，<kbd>Esc</kbd> 也能取消。断言钉死「确认前发出的删除请求数 = 0」。
 - **失败不装作成功。** 服务端拒绝（not found / forbidden / 落盘定位失败）时把**真实原因**显示给用户，且**不摘掉列表行**——避免「看起来删了其实还在」。通道缺席时同样给可读提示，不泄漏内部 `TypeError`。
-- **宿主路由不存在时说「请重启 DSH」，不说 HTTP 状态码。** 宿主进程只在**启动时**装配一次 profile（`dsh-desktop-host` 的 `main()` 里跑一遍 `runProfile`），没有热重载。装完插件不重启，`/ui-tools` 这条通道根本不存在，请求会掉进 `frontend-static` 的兜底处理器 —— 那里对非 `GET`/`HEAD` 一律 `405`。所以客户端专门把这种**非业务**的 404/405 识别成 `no-host`，提示「插件宿主半边未加载（宿主进程只在启动时装配插件）……请重启 DSH 后重试」。**否则用户看到的是一句没头没脑的 `删除失败：405 method not allowed`，根本不知道该去重启。**
+- **宿主路由不存在时说「请重启 DSH」，不说 HTTP 状态码。** 宿主进程只在**启动时**装配一次 profile（`dsh-desktop-host` 的 `main()` 里跑一遍 `runProfile`），没有热重载。装完插件不重启，`/api/ui-tools/sessionDelete` 这条路由根本不存在：`/api` 前缀路由在、精确子路由不在，于是内核回 **404**（若整条 `/api` 都没挂则掉进 `frontend-static` 兜底的 **405**）。所以客户端把这两种**非业务**状态码统一识别成 `no-host`，提示「插件宿主半边未加载（宿主进程只在启动时装配插件）……请重启 DSH 后重试」。**否则用户看到的是一句没头没脑的 `删除失败：405 method not allowed`，根本不知道该去重启。**
 
 > ⚠ **已知边界**：正在生成中的会话被删后，宿主 agent 可能在收尾时重建日志（插件已尽力先 `cancel`，但这是尽力而为）；本功能**不级联删除子会话分支**；工作区里残留的 id 由内核下次对账时自愈（`groupByWorkspace` 对 `list.byId[id] === undefined` 直接跳过，不会渲染死账）。
 >
 > ⚠ **装完必须重启 DSH**（不是刷新页面）。宿主半边是新写进 `lib/index.js` 的，只同步文件不重启，菜单会出现但点了只会提示「宿主半边未加载」。
 
+### ⚠ 为什么用 `connection.fetch` 而不是 `connection.rpc`
+
+v0.4.20 首发用的是 `connection.rpc.handle("/ui-tools", handler)` + 客户端 `connection.rpc.call(...)`。真机上**必然失败**，报：
+
+```
+register-failed: cannot get property "webServer" without inject
+    at Fiber.<anonymous> (…/dsh-client-connection/lib/index.js:871:35)
+    at Object.handle (…/dsh-client-connection/lib/index.js:727:39)
+```
+
+原因在 `dsh-client-connection` 自己身上：
+
+```js
+// :724  rpc getter —— owner 取的是 Connection 服务自己的 ctx
+get rpc() { const owner = this.ctx; return { handle: (channel, handler) => this.register(owner, channel, handler) }; }
+// :871  register 的最后一行 —— 拿 owner.webServer 去挂路由
+return owner.effect(() => owner.webServer.register(route), `client-connection: ${channel} rpc channel`);
+// :1013 而该插件自己的入口 inject 里没有 webServer
+const inject = ["credentials"];
+```
+
+于是**任何第三方插件**调 `rpc.handle` 都会在 `owner.webServer` 上抛「without inject」，`rpc` 通道这条路对插件彻底关闭。（宿主侧 `webServer` 和这完全是两回事：`ctx.inject(["webServer"], …)` 在自己的子 fiber 里拿是拿得到的，但那条路由**不经过鉴权**，见上一节。）
+
+`connection.fetch.register(route)` 走的是另一条链（`registerFetchRoute`，:840-854）：它**只往内部的 `fetchRoutes` Map 里塞一条精确路径**，完全不碰 `webServer`，返回 disposer，天然满足 R3/拆卸纪律。约束有三条：
+
+1. 路径必须以 `/api/` 开头（`assertFetchRoute` → `endpointFromPath("/api", path)`），且挂在 `/api` 那条 prefix 路由上按 pathname **精确**匹配；
+2. `methods` 非空不重复；
+3. 处理函数是标准 `(request: Request, peer) => Response`，body 由内核按 `requestBody: "buffered"` 缓冲好。
+
+**已由断言钉死**：宿主必须出现 `connection.fetch.register(`，且**不许**出现 `rpc.handle(`；客户端必须 `fetch(ctxDeleteUrl(), …)` 且 `SESSION_DELETE_PATH` 全文件只出现一处；宿主导出 `DELETE_ROUTE_PATH = "/api/ui-tools/sessionDelete"` 与客户端常量逐字一致；运行时逐项核对 URL（同源绝对地址）/ `method` / `credentials: "same-origin"` / `content-type` / `body.sessionId` / `body.cwd`。
+
+**为什么客户端拼同源绝对地址而不是相对路径**：相对路径把「同源」交给运行环境解释，Node 测试沙箱里 `fetch("/api/…")` 直接 `TypeError: Failed to parse URL` —— 断言只能看到同一句无意义报错，等于测了个寂寞。`ctxDeleteUrl()` 先取 `window.location.origin` 拼绝对地址，取不到才退回相对路径。
 ### 目标识别：为什么不能用 `aria-label`
 
 判据是官方渲染时**写死**的 `data-row-key` 前缀 —— `session:<id>` / `workspace:<id>`，**不看 `aria-label`、不看界面语言**。这一条来自参考插件注释里指出的坑：官方 `row-actions` 按钮在**空白会话**与**已归档会话**上根本不渲染，若靠「这一行有没有『会话操作』按钮」判定，这类行会被判成非会话行，菜单直接退化、拿不到 session。（同一结论、自写实现。）
@@ -221,7 +253,7 @@ node tools/live-smoke.mjs <URL+token>   # 真机冒烟（可选；自动探测�
 
 `tools/check-hooks-order.mjs` 专治一类**只在特定状态切换时才炸**的崩溃：React 靠「Hook 调用顺序 + 数组下标」识别 Hook，而它**从不清空 hook 数组**，只按 `hookIndex++` 覆盖——于是 `if (!cond) return null;` 夹在两个 Hook 之间时，`cond` 为假的那次渲染里后续 Hook 槽位残留上一次的值（若上次该槽是 `undefined`，卸载时 React 执行 `destroy()` 直接抛 `undefined is not a function`）。脚本用纯词法扫描（不引入 babel/typescript，守 R6）切出每个函数组件的函数体、跟踪最外层 `return` 与 `useXxx(` 调用的相对位置，命中即 FAIL；并自带双向负向对照（违规样例必红 + 合规写法不误报），确保断言本身不会退化成同义反复。
 
-`tools/check-context-menu.mjs` 用**手写 DOM 测试台**（零依赖，不引 jsdom）跑功能六的 155 条断言：从 `lib/client.js` 里按花括号配平**取出真实函数**注入沙箱执行，并把 `CTX_ZH` 词典求值出来做文案核对（断言看的是用户真正会看到的字，不是 stub 返回的键名）。覆盖判据识别（含「工作区行不被误判成会话行」）、三级降级与**标题歧义必须返回 null**、菜单组装与空菜单拒绝、三类目标的右键分发、键盘与外部点击、卸载后三类监听全部解绑且补丁摘干净、**动作真的调到官方服务而非空壳**、动作抛错不冒泡、不引用参考插件包名、CSS 并入共享标签、开关门控语义，以及 v0.4.20 的**删除会话全链路**（二次确认不可跳过、载荷字段逐字正确、宿主半边通道/端点常量与客户端一致、`connection.rpc.handle` 而非裸路由、可选服务确实没进 `inject`、删完不调 `archiveSession` 而调 `stopSessionActivity` + `clearMain` + `refresh`、失败不摘行、通道缺席给可读原因）。**负向对照必须真的变红**：判据改坏的方式是把源码文本改掉后重新编译沙箱（给 `env.ctxSessionRowId` 重新赋值是**无效**的——闭包内的调用走词法绑定，改不到；这一点本身就是踩过的坑）。另外，凡是「代码里不许出现 X」的断言都先**剥离注释**再比对，否则文件顶部写明「参考插件：@baihejiangnan/…」「无 MutationObserver」会把注释当代码判红。
+`tools/check-context-menu.mjs` 用**手写 DOM 测试台**（零依赖，不引 jsdom）跑功能六的 164 条断言：从 `lib/client.js` 里按花括号配平**取出真实函数**注入沙箱执行，并把 `CTX_ZH` 词典求值出来做文案核对（断言看的是用户真正会看到的字，不是 stub 返回的键名）。覆盖判据识别（含「工作区行不被误判成会话行」）、三级降级与**标题歧义必须返回 null**、菜单组装与空菜单拒绝、三类目标的右键分发、键盘与外部点击、卸载后三类监听全部解绑且补丁摘干净、**动作真的调到官方服务而非空壳**、动作抛错不冒泡、不引用参考插件包名、CSS 并入共享标签、开关门控语义，以及 v0.4.20 的**删除会话全链路**（二次确认不可跳过、载荷字段逐字正确、宿主半边路由常量与客户端一致、`connection.fetch.register` 而非裸路由**也非不可用的 `rpc.handle`**、可选服务确实没进 `inject`、删完不调 `archiveSession` 而调 `stopSessionActivity` + `clearMain` + `refresh`、失败不摘行、通道缺席给可读原因）。v0.4.21 起沙箱额外注入 `location` 与 `fetch` 两个形参（Node 无全局 `location`；不注入 `fetch` 时相对 URL 会直接 `TypeError: Failed to parse URL`，断言只能看到同一句无意义报错），并用可编程的 `fetchRoutes` 路由表模拟宿主行为 —— 未注册路径回 405 就是「宿主没重启」的真实形状。**`calls.deleted` 与 `fetchCalls` 是同一个数组，且它全局共享**：负向对照必须先 `const since = fetchCalls.length` 再 `slice(since)` 取新记录，否则读到的是上一个用例的正常 URL，对照会假绿（踩过）。**负向对照必须真的变红**：判据改坏的方式是把源码文本改掉后重新编译沙箱（给 `env.ctxSessionRowId` 重新赋值是**无效**的——闭包内的调用走词法绑定，改不到；这一点本身就是踩过的坑）。另外，凡是「代码里不许出现 X」的断言都先**剥离注释**再比对，否则文件顶部写明「参考插件：@baihejiangnan/…」「无 MutationObserver」会把注释当代码判红。
 
 > ⚠ **测试台的一个时间陷阱（v0.4.20 踩到）**：沙箱把 `setTimeout` 注入成 `(fn) => realSetTimeout(fn, 0)`，即**立刻执行**。而 `ctxToast` 用 `window.setTimeout(..., 1800)` 清理旧提示——真实浏览器里 1800ms 远大于微任务，但沙箱里那个清理回调会和新提示挤在同一批微任务里、并且**后执行**，于是一次 `.dsh-ctx-toast` 全扫会把刚落地的「已删除…」也删掉（断言看到的是空）。**规程**：凡断言「提示文案」的地方，让出**宏任务**（`await new Promise((r) => setImmediate(r))`）而不是若干次 `await Promise.resolve()`。
 
@@ -237,7 +269,18 @@ node tools/live-smoke.mjs <URL+token>   # 真机冒烟（可选；自动探测�
 
 ## 变更记录
 
-- **v0.4.20（本次）**：新增**「删除会话」**——右键会话行即可把会话从磁盘上真正删掉（不是归档）。
+- **v0.4.21（本次）**：修复「删除会话」在真机上**必然失败**的问题 —— 通道从 `connection.rpc` 换成 `connection.fetch`。
+  - **现象**：装好插件、重启 DSH、点「删除会话」→ 永远提示「插件宿主半边未加载（宿主进程只在启动时装配插件），无法删除会话；请重启 DSH 后重试」。重启多少次都一样。
+  - **根因（不是重启没生效，是 API 用错了）**：`connection.rpc.handle(channel, handler)` 内部走 `this.register(owner, channel, handler)`，`owner` 取的是 Connection 服务**自己的** ctx，最后一行 `dsh-client-connection/lib/index.js:871` 执行 `owner.webServer.register(route)` —— 而该插件入口 `:1013` 的 `inject` 只有 `["credentials"]`，**没有 `webServer`**。于是任何第三方插件调 `rpc.handle` 都会抛 `cannot get property "webServer" without inject`，整条 IPC 通道对插件彻底关闭。异常被注册过程的 catch 吞成 `channelState = "register-failed: …"`，客户端收到 404/405，翻译成「宿主半边未加载」——**提示完全正确，只是它在描述一个永久状态，不是重启能解决的**。
+  - **修法**：改用 `connection.fetch.register({ path: "/api/ui-tools/sessionDelete", methods: ["POST"], requestBody: "buffered", fetch })`（内核 `registerFetchRoute`，:840-854）—— 它**只往内部 `fetchRoutes` Map 里塞一条精确路径，完全不碰 `webServer`**，返回 disposer，天然满足 R3 与拆卸纪律。请求先经 `connection` 的 `/api` 共享处理器：Origin 栅栏 403 → cookie 鉴权 401 → `principal.kind === "owner"`，**安全边界仍在内核**。客户端相应改为 `fetch(ctxDeleteUrl(), { method:"POST", credentials:"same-origin", body })`，404/405 统一翻译成 `no-host`（保留「请重启 DSH」提示，那是给真·未重启的场景用的）。
+  - **顺带修掉两个排查期发现的真 bug**：① 宿主 handler 原先把 `scope`（只声明了 `connection` 一个依赖）传给 `deleteSession()`，导致 `sessionPersistence` / `sessionQuery` / `workspaceRegistry` **全是 `undefined`** —— 改成传插件根 `ctx`；② 探针路由原先用 `ctx.get("webServer")` 探测，返回 `undefined`（`Context._getImpl` 对未 ACTIVE 的服务返回 undefined），改成 `ctx.inject(["webServer"], …)` 子 fiber —— 顺带证实了「`inject` 缺席会让整条 fiber 静默 INACTIVE」这条老坑在宿主侧同样生效。
+  - **入口 `inject` 收为 `[]`**：宿主半边的一切依赖（`connection`、探针要的 `webServer`）都放进 **`ctx.inject([...], cb)` 子 fiber**，入口不再声明任何服务 —— R3 的加强版，插件永远不会因为某个服务缺席而整体不激活。
+  - **保留诊断能力**：`lib/index.js` 里留了 `diagLog()`（追加写 `~/.dsh/ui-tools-host.log`，全程 try/catch 吞异常）与只读探针 `GET /__dsh_ui_tools_probe`（返回 `delete channel = registered | pending | register-failed: …`）。排查这类「宿主侧静默失败」时，`node tools/diag-session-delete.mjs <port>` 一条命令就能区分「模块没加载 / apply 没跑 / 路由没挂 / 鉴权拦截」。
+  - **测试台改造（`tools/check-context-menu.mjs` 156 → 164 条）**：沙箱新增 `location`（Node 无全局 `location`）与 `fetch` 两个形参；新增 `fetchCalls` 记录 + `fetchRoutes` 可编程路由表（未注册路径回 405，用来模拟「宿主没重启」）；`connection` 换成「一碰就抛」的桩（谁改回 `rpc.call` 当场炸）。断言从「`rpc.call("/ui-tools", "sessionDelete")` 逐字」改为「`fetch(ctxDeleteUrl())` + 同源绝对地址 + method/credentials/content-type/body 逐项核对」；宿主静态钉改为「必须有 `connection.fetch.register(`、不许有 `rpc.handle(`、`DELETE_ROUTE_PATH` 与客户端常量逐字一致」。**负向对照 6 条**（含新增：把 `404/405 → no-host` 判定拆掉 → 重启提示必须变红；把删除路径改坏 → URL 断言必须变红）。
+  - **回归**：`npm run check` 全绿 —— 钩子钉 **7/7** + 座位钉 **38/38** + 右键钉 **164/164** + 漂移钉 **3/3** + compat-check **91/91** + live-smoke SKIP（需 `DSH_SMOKE_URL`+token）。
+  - **需要重装插件 + 重启 DSH**：`lib/client.js` 与 `lib/index.js` 都改了，宿主侧只在启动时装配一次 profile。
+
+- **v0.4.20**：新增**「删除会话」**——右键会话行即可把会话从磁盘上真正删掉（不是归档）。
   - **动机**：既有「归档会话」只把 id 记进 `archivedSessionIds`，日志文件一个字节不动；用户要的是「真删」。
   - **内核事实（逐个核过，不是猜的）**：`session/*` 20 个方法、`workspace/*` 12 个方法**都没有** delete/remove session；`workspace/delete` 的描述是「移除一个工作区登记，保留文件与会话」；`workspace/archiveSession` 第一步 `await sessionKnown(id)`，文件删掉后会抛 `WorkspaceUnknownSessionError`。渲染进程也没有任何工具执行通道（`tools/*` 只有 `tools/message`）。社区插件 `Geralt4/dsh-plugin-session-delete` 的 README 给出同一结论。
   - **实现**：**宿主半边** `lib/index.js` 从 4 行空壳变成真正的 host 入口 —— `inject = ["connection"]`，`ctx.effect(() => connection.rpc.handle("/ui-tools", handler))` 注册端点 `sessionDelete`：核 owner 身份 → `agents.get(id)?.cancel({kind:"user"})` + `workspaceRegistry.stopSessionActivity` 尽力停掉活动 → `WorkspaceEntity.detachSession` 从工作区登记摘除 → `sessionPersistence.locate({id, cwd}).path`（三级 cwd 解析：`sessionQuery.observeSession` → `persistence.list` → 客户端带上的 cwd）→ `fs.rm(dirname(path), {recursive:true, force:true, maxRetries:3})`。**客户端半边**则在会话菜单加 danger 项「删除会话…」+ 二次确认，成功后 `stopSessionActivity` / `clearMain` / `sessions.refresh()` 三步收尾让行消失。

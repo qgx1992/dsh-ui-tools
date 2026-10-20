@@ -259,7 +259,20 @@ const window = {
 	innerWidth: 1280,
 	innerHeight: 800,
 	listeners: new Map(),
-	location: { reload() { window.__reloaded = true; }, replace() { window.__replaced = true; } },
+	location: {
+		// v0.4.21：删除请求要拼同源绝对地址，ctxDeleteUrl 读的就是 window.location.origin。
+		// 假 window 上不给 origin 的话，客户端会退回相对路径 —— 真机行为不变，
+		// 但「打的是同源绝对地址」这条断言就永远测不到了，等于白写。
+		origin: "http://127.0.0.1:64514",
+		protocol: "http:",
+		host: "127.0.0.1:64514",
+		hostname: "127.0.0.1",
+		port: "64514",
+		href: "http://127.0.0.1:64514/",
+		pathname: "/",
+		reload() { window.__reloaded = true; },
+		replace() { window.__replaced = true; },
+	},
 	__reloaded: false,
 	__replaced: false,
 	// 真机 window 上就有 setTimeout；ctxReload 的「reload 被吞就 replace 保底」
@@ -363,7 +376,7 @@ const wanted = [
 	"ctxCopy", "ctxToast", "ctxReload", "ctxInsertIntoComposer",
 	"ctxOpenOfficialRename", "ctxMenuItem", "ctxSeparator",
 	"closeCtxMenu", "ctxPositionMenu", "ctxOpenMenu", "installContextMenu",
-	"ctxFill", "ctxConfirmDialog", "ctxCallSessionDelete", "ctxRestoreMenuFocus",
+	"ctxFill", "ctxConfirmDialog", "ctxDeleteUrl", "ctxCallSessionDelete", "ctxRestoreMenuFocus",
 	"ctxReleaseSession", "ctxCurrentSessionId",
 ];
 const missing = wanted.filter((name) => extractFunction(name) === null);
@@ -378,16 +391,39 @@ const stateAt = src.indexOf(stateAnchor);
 if (stateAt < 0) { console.error("ctxMenuState 未找到"); process.exit(1); }
 const stateEnd = src.indexOf("\n", stateAt);
 
-const sandbox = buildSandbox();
+// 模块作用域的常量 / 字面量也要一起搬进沙箱，否则函数体里引用它们会 ReferenceError。
+// 这里只搬「纯字面量」，不搬任何有副作用的初始化。
+const literalAnchors = [
+	"const CTX_NS = ",
+	"const SESSION_DELETE_PATH = ",
+];
+const literalBlocks = literalAnchors.map((anchor) => {
+	const at = src.indexOf(anchor);
+	if (at < 0) {
+		console.error(`模块常量未在 lib/client.js 中找到：${anchor}`);
+		process.exit(1);
+	}
+	const end = src.indexOf("\n", at);
+	return src.slice(at, end).replace(/;\s*$/, "");
+});
+
+/** 沙箱形参表（正常沙箱与坏沙箱**必须逐字一致**，否则坏沙箱求值会 ReferenceError）。 */
+const SANDBOX_PARAMS = [
+	"document", "window", "navigator", "HTMLElement", "Element", "Event", "InputEvent",
+	"setTimeout", "console", "location", "fetch",
+];
+
+/** 沙箱源码里除函数之外必须一起求值的部分（模块常量 + ctxMenuState）。 */
+const SANDBOX_PRELUDE = `${literalBlocks.join(";\n")};\n${src.slice(stateAt, stateEnd)};`;
 
 /** 正常源码编译出的沙箱工厂；传入 functions 可编译被改坏过的版本。 */
 function buildSandbox(functions) {
 	const body = (functions === void 0 ? wanted.map(extractFunction) : functions).join("\n");
 	return new Function(
-		"document", "window", "navigator", "HTMLElement", "Element", "Event", "InputEvent", "setTimeout", "console",
+		...SANDBOX_PARAMS,
 		`${body}
-		 ${src.slice(stateAt, stateEnd)};
-		 return { ${wanted.join(", ")}, ctxMenuState };`,
+		 ${SANDBOX_PRELUDE}
+		 return { ${wanted.join(", ")}, ctxMenuState, SESSION_DELETE_PATH };`,
 	);
 }
 
@@ -408,13 +444,16 @@ function buildBrokenEnv(target, mutate) {
 		return name === target ? mutate(text) : text;
 	});
 	const brokenSandbox = new Function(
-		"document", "window", "navigator", "HTMLElement", "Element", "Event", "InputEvent", "setTimeout", "console",
+		...SANDBOX_PARAMS,
 		`${broken.join("\n")}
-		 ${src.slice(stateAt, stateEnd)};
-		 return { ${wanted.join(", ")}, ctxMenuState };`,
+		 ${SANDBOX_PRELUDE}
+		 return { ${wanted.join(", ")}, ctxMenuState, SESSION_DELETE_PATH };`,
 	);
 	return brokenSandbox;
 }
+
+/** 正常源码编译出的沙箱（必须在 SANDBOX_PARAMS / wanted 都就绪之后才求值）。 */
+const sandbox = buildSandbox();
 
 /**
  * 建一个空的假 DOM 环境。
@@ -432,17 +471,82 @@ function buildEnv(factory) {
 	window.__reloaded = false;
 	window.__replaced = false;
 	window.__selection = null;
-	const realSetTimeout = setTimeout;
-	return makeSandboxArgs(factory === void 0 ? sandbox : factory, realSetTimeout);
+	return makeSandboxArgs(factory === void 0 ? sandbox : factory);
 }
 
+/**
+ * 测试台自己的 fetch。
+ *
+ * 为什么不用 Node 的全局 fetch：客户端打的是 `/api/ui-tools/sessionDelete`，
+ * 那是**宿主进程**上的路由，测试台里既没有宿主也没有真实网络，真去发只会
+ * 得到一句 TLS/连接错误，什么问题都说明不了。
+ *
+ * 于是这里放一个**可控的替身**：路由表默认只有宿主半边注册的那一条，
+ * 返回 { ok:true, value } ；测试可以临时换掉 handler 来模拟 403/404/405、
+ * 业务失败、网络炸裂等分支。每次调用的原始入参（URL / init）都记进
+ * `fetchCalls`，断言会拿它核对「打的地址对不对、method 对不对、body 带没带」。
+ */
+const fetchCalls = [];
+const fetchRoutes = new Map([
+	["/api/ui-tools/sessionDelete", () => new Response(JSON.stringify({ ok: true, value: { ok: true } }), {
+		status: 200,
+		headers: { "content-type": "application/json" },
+	})],
+]);
+/**
+ * @param {string} url 客户端传进来的地址（本插件一定是同源绝对地址）。
+ * @param {Object} [init] fetch 的第二参数。
+ */
+function testFetch(url, init) {
+	const record = { url: String(url), init: init === void 0 ? {} : init };
+	record.method = record.init.method === void 0 ? "GET" : record.init.method;
+	try {
+		record.body = typeof record.init.body === "string" ? JSON.parse(record.init.body) : record.init.body;
+	} catch (error) {
+		record.body = record.init.body;
+	}
+	fetchCalls.push(record);
+	// 只按 pathname 匹配，这样「客户端拼了哪个 origin」不影响路由命中判断 ——
+	// origin 本身另有断言专门核对。
+	let pathname = record.url;
+	try {
+		pathname = new URL(record.url).pathname;
+	} catch (error) {
+		/* 相对地址就走原样匹配 */
+	}
+	const handler = fetchRoutes.get(pathname);
+	if (handler === void 0) {
+		// 没注册的路由：真机上会掉进 frontend-static 的 fallback —— 非 GET/HEAD 405。
+		return Promise.resolve(new Response("method not allowed", { status: 405 }));
+	}
+	try {
+		return Promise.resolve(handler(record));
+	} catch (error) {
+		return Promise.reject(error);
+	}
+}
+
+/** 测试台自己的 location（Node 里没有全局 location，必须自己造一个同源壳）。 */
+const location = Object.freeze({
+	origin: "http://127.0.0.1:64514",
+	protocol: "http:",
+	host: "127.0.0.1:64514",
+	hostname: "127.0.0.1",
+	port: "64514",
+	href: "http://127.0.0.1:64514/",
+	pathname: "/",
+});
+
 /** 统一的调用参数（正常沙箱与坏沙箱共用）。 */
-function makeSandboxArgs(fn, realSetTimeout) {
+function makeSandboxArgs(fn) {
+	const realSetTimeout = setTimeout;
 	return fn(
 		document, window, navigator, Element, Element, makeEvent,
 		class InputEvent extends Object { constructor(type, init) { super(); Object.assign(this, { type }, init); } },
 		(fn2) => realSetTimeout(fn2, 0),
 		console,
+		location,
+		testFetch,
 	);
 }
 
@@ -512,7 +616,7 @@ function makeStores() {
 			{ workspaceId: "w1", title: "项目一", path: "D:\\proj", sessionIds: ["s1", "s2"] },
 		],
 	};
-	const calls = { archived: [], forked: [], opened: [], started: [], deleted: [], stopped: [], refreshed: [], cleared: [] };
+	const calls = { archived: [], forked: [], opened: [], started: [], deleted: fetchCalls, stopped: [], refreshed: [], cleared: [] };
 	// ── 以下三个 mock 严格按**真实内核**的公开方法表来搭 ──
 	//
 	// 曾经的 mock 把 startSession 放在 workspaces 上、把 open 放在 sessions 上，
@@ -550,21 +654,19 @@ function makeStores() {
 		// 真实 UiWorkspaceService 的公开实例字段：{ sessionId } 或 undefined。
 		mainReference: { sessionId: "s1" },
 	};
-	// ── connection（内核的 HostConnectionService，真实签名见
-	//    @deepseek-ai/dsh-client-connection/lib/client.browser.js:1209-1239）──
+	// ── v0.4.21：删除改走 fetch，`calls.deleted` 由测试台的 testFetch 填充 ──
 	//
-	// 真实形状：connection.rpc.call(channel, endpoint, payload, signal) 返回
-	// Promise，**信封已解开**，直接给出服务端 payload 本体。
-	// 本插件宿主半边注册的通道是 "/ui-tools"、端点是 "sessionDelete"。
-	// 这里刻意不让它自己判对错：断言要能分辨「调了没」和「调对了没」，
-	// 所以无论入参如何一律回 ok:true，调用参数由 calls.deleted 记录。
+	// 这一段以前记的是 connection.rpc.call 的 (channel, endpoint, payload)。
+	// 改成 fetch 之后，同样的信息从 fetchCalls 里取，而且多了 method / headers /
+	// credentials 这三维（rpc.call 时代这些都由内核代劳，现在是我们自己写的，
+	// 必须逐项核对）。
+	//
+	// 这里仍然保留一个 connection 替身，因为 installContextMenu 的形参表里有它；
+	// 但**故意不给 rpc 通道**：谁把实现改回 connection.rpc.call，改写立刻回退到
+	// 「永远 404」，断言当场变红，而不是偷偷摸摸继续通过。
 	const connection = {
-		rpc: {
-			call: (channel, endpoint, payload) => {
-				calls.deleted.push({ channel, endpoint, payload });
-				return Promise.resolve({ ok: true, value: { ok: true, sessionId: payload.sessionId } });
-			},
-		},
+		fetch: { register: () => { throw new Error("测试台不接受宿主侧注册，客户端不该碰这条路径"); } },
+		rpc: { call: () => { throw new Error("测试台已禁用 rpc.call（v0.4.21 起删除走 fetch）"); } },
 	};
 	return { sessions, workspaces, uiWorkspace, connection, calls, sessionsState, workspacesState };
 }
@@ -1520,9 +1622,18 @@ await (async () => {
 
 	// ── 静态：通道契约与宿主半边对齐 ──
 	{
-		const clientSide = /"/.test("") ? "" : ""; // 占位，保持结构清晰
-		if (/rpc\s*\.\s*call\s*\(\s*"\/ui-tools"\s*,\s*"sessionDelete"/.test(code)) ok("客户端调用通道逐字正确（\"/ui-tools\" + \"sessionDelete\"）");
-		else bad("客户端调用通道名/端点名不对（与宿主半边注册的常量必须完全一致）");
+		// v0.4.21：通道从 connection.rpc.handle 改成 connection.fetch.register，
+		// 客户端相应地直接 fetch 宿主的精确路由。路径字面量必须与
+		// lib/index.js 的 DELETE_ROUTE_PATH 逐字一致。
+		if (/fetch\s*\(\s*ctxDeleteUrl\s*\(\s*\)/.test(code) && /const SESSION_DELETE_PATH = "\/api\/ui-tools\/sessionDelete";/.test(code)) {
+			ok("客户端调用路径逐字正确（\"/api/ui-tools/sessionDelete\"）");
+		} else bad("客户端调用路径不对（与宿主半边注册的路由必须完全一致）");
+
+		// 反向：路径必须是从一个具名常量拼出来的，**不许**散落成裸字符串
+		// 多份拷贝（那样改一处漏一处，真机上就是 404）。
+		const literalCount = (code.match(/"\/api\/ui-tools\/sessionDelete"/g) || []).length;
+		if (literalCount === 1) ok("删除路径只在一处写死（其余全用常量/函数拼接）", String(literalCount));
+		else bad("删除路径字面量出现了多处拷贝（改一处漏一处就会 404）", String(literalCount));
 
 		// 宿主半边 lib/index.js 里必须真的导出这两条常量，且值一致。
 		let hostSource = null;
@@ -1531,19 +1642,48 @@ await (async () => {
 		} catch (error) {
 			hostSource = null;
 		}
-		if (hostSource !== null && /export const RPC_CHANNEL = "\/ui-tools";/.test(hostSource) && /export const SESSION_DELETE_ENDPOINT = "sessionDelete";/.test(hostSource)) {
-			ok("宿主半边导出的通道/端点常量与客户端一致");
+		if (hostSource !== null && /export const DELETE_ROUTE_PATH = "\/api\/ui-tools\/sessionDelete";/.test(hostSource)) {
+			ok("宿主半边导出的路由常量与客户端一致");
 		} else bad("宿主半边常量缺失或与客户端不一致（删了也不会生效）");
 
-		if (hostSource !== null && /export const inject = \["connection"\];/.test(hostSource)) ok("宿主半边入口 inject 声明了 connection");
-		else bad("宿主半边没有声明 connection");
+		// 入口 inject 故意留空：Cordis 的 fiber 只要有一个 inject 服务缺席就一直
+		// 停在 INACTIVE，apply 的函数体根本不执行，且**不报错**——表现和「插件没
+		// 装上」完全一样，真机上无从区分。所以服务一律在 apply 内部现场取。
+		if (hostSource !== null && /^export const inject = \[\];/m.test(hostSource)) ok("宿主半边入口 inject 为空（服务缺席不会让 apply 静默不执行）");
+		else bad("宿主半边入口 inject 不该声明服务（缺席会让 apply 静默不执行，且与「没装上」无法区分）");
 
-		if (hostSource !== null && /connection\s*\.\s*rpc\s*\.\s*handle\s*\(/.test(hostSource)) ok("宿主半边用 connection.rpc.handle 注册通道（自带 Host/Origin 栅栏 + cookie 鉴权 + owner 身份）");
-		else bad("宿主半边没有走 connection.rpc.handle（裸 webServer 路由会缺鉴权）");
+		if (hostSource !== null && /ctx\s*\.\s*inject\s*\(\s*\[\s*"connection"\s*\]/.test(hostSource)) ok("宿主半边在 apply 内部用 ctx.inject([\"connection\"]) 取连接层");
+		else bad("宿主半边没有在 apply 内部取 connection");
 
-		// ⚠ 绝不能退化成自己注册裸路由：那样任意网页一个 POST 就能删数据。
-		if (hostSource !== null && /webServer\s*\.\s*register\s*\(/.test(stripComments(hostSource))) bad("宿主半边用 webServer.register 注册了裸路由（缺鉴权，可被任意网页 CSRF）");
-		else ok("宿主半边没有注册裸 webServer 路由（R3 之外的安全底线）");
+		// ⚠ 这里**必须**是 connection.fetch.register，不能是 connection.rpc.handle：
+		//   rpc.handle 内部执行 `owner.effect(() => owner.webServer.register(route))`
+		//   （dsh-client-connection:871），而 owner 是 Connection 服务自己的 ctx，
+		//   其插件入口 inject = ["credentials"]（:1013）里**没有 webServer** ——
+		//   第三方插件调它必然抛 `cannot get property "webServer" without inject`。
+		//   真机日志 ~/.dsh/ui-tools-host.log 里逐字记录过这条。谁把它改回去，
+		//   删除功能就会 100% 失效。
+		if (hostSource !== null && /connection\s*\.\s*fetch\s*\.\s*register\s*\(/.test(hostSource)) ok("宿主半边用 connection.fetch.register 注册精确路由（通道自带 Host/Origin 栅栏 + cookie 鉴权）");
+		else bad("宿主半边没有走 connection.fetch.register");
+
+		if (hostSource !== null && /rpc\s*\.\s*handle\s*\(/.test(stripComments(hostSource))) bad("宿主半边又用回了 connection.rpc.handle（第三方插件不可用，必然抛 webServer inject 错误）");
+		else ok("宿主半边没有用 connection.rpc.handle（第三方插件调它必然抛错）");
+
+		// ⚠ 安全底线：**删除动作**绝不能走裸路由，否则任意网页一个 POST 就能删数据。
+		// 允许的唯一裸路由例外是只读诊断探针（它不接收任何输入、不改任何状态）。
+		// 判据：webServer.register 出现处，其 handler 里不许出现 fs.rm / deleteSession。
+		if (hostSource !== null) {
+			const hostCode = stripComments(hostSource);
+			const registerAt = hostCode.search(/webServer\s*\.\s*register\s*\(/);
+			if (registerAt === -1) {
+				ok("宿主半边没有注册任何裸 webServer 路由");
+			} else {
+				// 取 register({...}) 之后到 apply 结束的整段，确认删除逻辑没被搬进裸路由。
+				const tail = hostCode.slice(registerAt);
+				const handlerPart = tail.slice(0, tail.indexOf("ctx.inject") === -1 ? tail.length : tail.indexOf("ctx.inject"));
+				if (/deleteSession\s*\(|\.rm\s*\(/.test(handlerPart)) bad("裸 webServer 路由里出现了删除逻辑（缺鉴权，可被任意网页 CSRF 删数据）");
+				else ok("裸 webServer 路由只做只读探针，删除逻辑仍在 connection 通道里");
+			}
+		}
 
 		if (hostSource !== null && /rm\s*\(\s*directory\s*,\s*\{\s*recursive: true, force: true/.test(hostSource)) ok("宿主半边递归删除会话目录（force 让已删不抛）");
 		else bad("宿主半边的删除调用形态不对");
@@ -1641,15 +1781,25 @@ await (async () => {
 		//   「正在删除」或空。真实浏览器里 1800ms 远大于这些微任务，
 		//   顺序不会颠倒；测试台必须显式让出宏任务来还原同一时序。
 		await new Promise((resolve) => setImmediate(resolve));
+		// 从这一刻起，`calls.deleted` 记录的是**真实的 fetch 入参**（见 testFetch）：
+		//   { url, method, body, init }。断言要同时核对地址、方法、凭据与载荷。
 		const call = stores.calls.deleted[0];
-		if (call !== void 0 && call.channel === "/ui-tools" && call.endpoint === "sessionDelete") ok("确认后走 connection.rpc.call(\"/ui-tools\",\"sessionDelete\")", JSON.stringify({ c: call.channel, e: call.endpoint }));
-		else bad("确认后没走对通道", call === void 0 ? "（没调用）" : JSON.stringify({ c: call.channel, e: call.endpoint }));
-		if (call !== void 0 && call.payload.sessionId === "s1") ok("载荷带上了会话 id", call.payload.sessionId);
-		else bad("载荷里的会话 id 不对", call === void 0 ? "（没调用）" : JSON.stringify(call.payload));
+		const expectedUrl = `${location.origin}/api/ui-tools/sessionDelete`;
+		if (call !== void 0 && call.url === expectedUrl) ok("确认后打的是同源绝对地址 /api/ui-tools/sessionDelete", call.url);
+		else bad("确认后没打对地址", call === void 0 ? "（没调用）" : call.url);
+		if (call !== void 0 && call.method === "POST") ok("用 POST 发删除请求", call.method);
+		else bad("删除请求的 method 不对", call === void 0 ? "（没调用）" : call.method);
+		// cookie 必须带上：宿主侧 admit(req) 靠它认 owner，漏了就 403。
+		if (call !== void 0 && call.init.credentials === "same-origin") ok("fetch 带了 credentials: \"same-origin\"（否则宿主 403）", call.init.credentials);
+		else bad("fetch 没带 same-origin 凭据（真机上会被宿主拒绝）", call === void 0 ? "（没调用）" : String(call.init.credentials));
+		if (call !== void 0 && call.init.headers !== void 0 && /application\/json/.test(call.init.headers["content-type"] || "")) ok("请求头声明了 application/json");
+		else bad("请求头没声明 JSON（宿主侧的 request.json() 会失败）");
+		if (call !== void 0 && call.body !== void 0 && call.body.sessionId === "s1") ok("载荷带上了会话 id", call.body.sessionId);
+		else bad("载荷里的会话 id 不对", call === void 0 ? "（没调用）" : JSON.stringify(call.body));
 		// cwd 一起带上去：宿主半边的 sessionQuery/persistence 都可能定位不到
 		// （例如会话从未在当前内核观察过），必须有一个兜底。
-		if (call !== void 0 && call.payload.cwd === "D:\\proj\\alpha") ok("载荷带上了会话 cwd（宿主半边定位失败时兜底）", call.payload.cwd);
-		else bad("载荷没带 cwd", call === void 0 ? "（没调用）" : JSON.stringify(call.payload));
+		if (call !== void 0 && call.body !== void 0 && call.body.cwd === "D:\\proj\\alpha") ok("载荷带上了会话 cwd（宿主半边定位失败时兜底）", call.body.cwd);
+		else bad("载荷没带 cwd", call === void 0 ? "（没调用）" : JSON.stringify(call.body));
 		// ── 删完之后必须让列表行消失 ──
 		//
 		// v0.4.20 定稿：**不能**走 workspaces.archiveSession。它的第一步是
@@ -1688,18 +1838,23 @@ await (async () => {
 		if (storesRel.calls.refreshed.length === 0) ok("负向对照：收尾被短路后「重拉基线」确实没发生（上面那条不是摆设）", "0");
 		else bad("负向对照失效：收尾被短路了却仍然 refresh 了", String(storesRel.calls.refreshed.length));
 
-		// ── 负向对照：把通道名写错一位，上面那条必须变红 ──
-		const brokenEnv = buildBrokenEnv("ctxCallSessionDelete", (text) => text.replace('rpc.call("/ui-tools"', 'rpc.call("/ui-tool"'));
-		const env2 = buildEnv(brokenEnv);
-		const tree2 = buildTree(env2);
-		const s2 = makeStores();
-		// 这里必须自己断言通道名，因为假 connection 不校验 —— 直接拿改坏版本的
-		// 函数跑一遍，确认它发出去的通道名确实错了。
-		const brokenCall = env2.ctxCallSessionDelete(() => s2.connection, "s1", "D:\\proj\\alpha");
-		await brokenCall.then(() => void 0, () => void 0);
-		const brokenChannel = s2.calls.deleted[0] === void 0 ? "" : s2.calls.deleted[0].channel;
-		if (brokenChannel === "/ui-tool") ok("负向对照：通道名写错一位会被静态断言抓住（上面那条不是摆设）", brokenChannel);
-		else bad("负向对照失效：改坏通道名后静态断言仍会放过", brokenChannel || "（没调用）");
+		// ── 负向对照：把请求路径写错一位，上面那条必须变红 ──
+		// v0.4.21 起路径来自模块常量 SESSION_DELETE_PATH，所以直接改坏那个常量：
+		// 改的是**真正驱动行为的字节**，而不是断言里的正则。
+		{
+			const brokenEnv = buildBrokenEnv("ctxDeleteUrl", (text) => text.replace("SESSION_DELETE_PATH;", "SESSION_DELETE_PATH + \"x\";"));
+			const envB = buildEnv(brokenEnv);
+			const sB = makeStores();
+			// ⚠ fetchCalls 是**全局共享**数组（calls.deleted 就是它），前面已经积累
+			//   了不少正常调用的记录。只取「本段之前已有的条数」之后新增的那些，
+			//   否则读到的是上一个用例的正常 URL，对照必然假绿 —— 这一版就踩过。
+			const since = fetchCalls.length;
+			await envB.ctxCallSessionDelete(() => sB.connection, "s1", "D:\\proj\\alpha").then(() => void 0, () => void 0);
+			const fresh = fetchCalls.slice(since);
+			const got = fresh.length === 0 ? "" : fresh[0].url;
+			if (got !== "" && got !== expectedUrl) ok("负向对照：路径写错一位会被地址断言抓住（上面那条不是摆设）", got);
+			else bad("负向对照失效：路径改坏了断言仍会放过", got || "（没调用）");
+		}
 	}
 
 	// ── 运行时：宿主拒绝了怎么办（服务端回 ok:false） ──
@@ -1707,30 +1862,74 @@ await (async () => {
 		const env = buildEnv();
 		const tree = buildTree(env);
 		const stores = makeStores();
-		stores.connection.rpc.call = (channel, endpoint, payload) => {
-			stores.calls.deleted.push({ channel, endpoint, payload });
-			return Promise.resolve({ ok: false, error: { code: "session-unknown", message: "内核里找不到这个会话的落盘位置" } });
-		};
-		install(env, { sessions: stores.sessions, workspaces: stores.workspaces, uiWorkspace: stores.uiWorkspace, connection: stores.connection });
-		tree.sessionRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
-		document.body.querySelector(".dsh-ctx-menu").querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("删除会话")).dispatchEvent(makeEvent("click"));
-		document.body.querySelector(".dsh-ctx-confirm").querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("永久删除")).dispatchEvent(makeEvent("click"));
-		// 同前面那条注释：让出宏任务，否则假 window 的清理令牌会把
-		// 刚落地的「删除失败：…」一起清掉，断言只看得到「正在删除会话…」。
-		await new Promise((resolve) => setImmediate(resolve));
-		const toast = document.body.querySelector(".dsh-ctx-toast");
-		const text = toast === null ? "" : toast.textContent;
-		if (text.includes("删除失败") && text.includes("落盘位置")) ok("服务端明确拒绝时把真实原因显示给用户", text);
-		else bad("服务端拒绝时没有可读提示", text || "（无 toast）");
-		if (stores.calls.archived.length === 0) ok("删除失败时不摘掉列表行（避免「看起来删了其实还在」）");
-		else bad("删除失败却把行从列表摘掉了");
-		let threw = false;
-		try { await Promise.resolve(); } catch (error) { threw = true; }
-		if (!threw) ok("失败路径不产生未捕获拒绝");
-		else bad("失败路径抛出了未捕获拒绝");
+		// 换掉宿主路由的 handler：回一个业务拒绝信封（HTTP 200 + ok:false）。
+		fetchRoutes.set("/api/ui-tools/sessionDelete", () => new Response(
+			JSON.stringify({ ok: false, error: { code: "session-unknown", message: "内核里找不到这个会话的落盘位置" } }),
+			{ status: 200, headers: { "content-type": "application/json" } },
+		));
+		try {
+			install(env, { sessions: stores.sessions, workspaces: stores.workspaces, uiWorkspace: stores.uiWorkspace, connection: stores.connection });
+			tree.sessionRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
+			document.body.querySelector(".dsh-ctx-menu").querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("删除会话")).dispatchEvent(makeEvent("click"));
+			document.body.querySelector(".dsh-ctx-confirm").querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("永久删除")).dispatchEvent(makeEvent("click"));
+			// 同前面那条注释：让出宏任务，否则假 window 的清理令牌会把
+			// 刚落地的「删除失败：…」一起清掉，断言只看得到「正在删除会话…」。
+			await new Promise((resolve) => setImmediate(resolve));
+			const toast = document.body.querySelector(".dsh-ctx-toast");
+			const text = toast === null ? "" : toast.textContent;
+			if (text.includes("删除失败") && text.includes("落盘位置")) ok("服务端明确拒绝时把真实原因显示给用户", text);
+			else bad("服务端拒绝时没有可读提示", text || "（无 toast）");
+			if (stores.calls.archived.length === 0) ok("删除失败时不摘掉列表行（避免「看起来删了其实还在」）");
+			else bad("删除失败却把行从列表摘掉了");
+			let threw = false;
+			try { await Promise.resolve(); } catch (error) { threw = true; }
+			if (!threw) ok("失败路径不产生未捕获拒绝");
+			else bad("失败路径抛出了未捕获拒绝");
+		} finally {
+			// 必须还原，否则后面所有用例都会吃到这个「永远失败」的宿主。
+			fetchRoutes.set("/api/ui-tools/sessionDelete", () => new Response(JSON.stringify({ ok: true, value: { ok: true } }), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			}));
+		}
 	}
 
-	// ── 运行时：connection 缺席（旧内核）必须有明确提示 ──
+	// ── 运行时：宿主路由缺失（405/404）必须有明确提示 ──
+	//
+	// v0.4.21 起客户端不再依赖 connection：删除走 fetch，路由是否存在于
+	// **宿主进程**里才是决定性的。所以这里不再用「connection 缺席」模拟，
+	// 而是让宿主路由直接返回 405 —— 那正是「装了插件但没重启 DSH」时
+	// frontend-static fallback 给出的响应。
+	{
+		const env = buildEnv();
+		const stores = makeStores();
+		fetchRoutes.set("/api/ui-tools/sessionDelete", () => new Response("method not allowed", { status: 405 }));
+		try {
+			install(env, { sessions: stores.sessions, workspaces: stores.workspaces, uiWorkspace: stores.uiWorkspace, connection: stores.connection });
+			const tree = buildTree(env);
+			tree.sessionRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
+			document.body.querySelector(".dsh-ctx-menu").querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("删除会话")).dispatchEvent(makeEvent("click"));
+			document.body.querySelector(".dsh-ctx-confirm").querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("永久删除")).dispatchEvent(makeEvent("click"));
+			await new Promise((resolve) => setImmediate(resolve));
+			const toast = document.body.querySelector(".dsh-ctx-toast");
+			const text = toast === null ? "" : toast.textContent;
+			if (text.includes("宿主半边") && /重启|重装/.test(text)) ok("宿主路由缺失时提示指向「重启 DSH」而不是 405 原文", text.slice(0, 48));
+			else bad("宿主路由缺失时提示没指向重启 —— 用户看到的就是一句没头没脑的 HTTP 状态码", text || "（无 toast）");
+			if (stores.calls.archived.length === 0) ok("宿主路由缺失时不摘掉列表行");
+			else bad("宿主路由缺失却摘掉了列表行");
+		} finally {
+			fetchRoutes.set("/api/ui-tools/sessionDelete", () => new Response(JSON.stringify({ ok: true, value: { ok: true } }), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			}));
+		}
+	}
+
+	// ── 运行时：connection 缺席也必须能用 ──
+	//
+	// v0.4.21 起删除走 fetch，**不再依赖 connection**。这条断言把「不依赖」
+	// 固化下来：connection 传 undefined 时删除照样成功。谁哪天又把它绑回
+	// connection，这里会立刻变红。
 	{
 		const env = buildEnv();
 		const tree = buildTree(env);
@@ -1741,24 +1940,29 @@ await (async () => {
 		const item = menu === null ? void 0 : menu.querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("删除会话"));
 		if (item !== void 0 && item !== null) ok("内核没有 connection 时「删除会话」仍然出现（不做功能级静默隐藏）");
 		else bad("内核没有 connection 时「删除会话」消失了");
-		item.dispatchEvent(makeEvent("click"));
-		const dialog = document.body.querySelector(".dsh-ctx-confirm");
-		const confirm = dialog === null ? void 0 : dialog.querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("永久删除"));
-		let threw = false;
-		if (confirm !== void 0 && confirm !== null) {
-			try { confirm.dispatchEvent(makeEvent("click")); } catch (error) { threw = true; }
+		if (item !== void 0 && item !== null) {
+			item.dispatchEvent(makeEvent("click"));
+			const dialog = document.body.querySelector(".dsh-ctx-confirm");
+			const confirm = dialog === null ? void 0 : dialog.querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("永久删除"));
+			let threw = false;
+			if (confirm !== void 0 && confirm !== null) {
+				try { confirm.dispatchEvent(makeEvent("click")); } catch (error) { threw = true; }
+			}
+			await new Promise((resolve) => setImmediate(resolve));
+			const toast = document.body.querySelector(".dsh-ctx-toast");
+			const text = toast === null ? "" : toast.textContent;
+			if (!threw) ok("connection 缺席时点删除不抛异常");
+			else bad("connection 缺席时点删除抛了异常");
+			// 关键：不依赖 connection —— 删除应当**成功**，而不是报「插件通道缺失」。
+			if (text.includes("已删除会话")) ok("connection 缺席时删除照常成功（v0.4.21：走 fetch，不再依赖 connection）", text);
+			else bad("connection 缺席时删除失败了（说明它又被绑回 connection）", text || "（无 toast）");
+			if (text.includes("is not a function")) bad("提示里泄漏了内部 TypeError（用户看不懂）", text);
+			else ok("提示里没有泄漏内部 TypeError");
+			if (stores.calls.archived.length === 0) ok("删除成功路径不调 archiveSession（文件已删，会抛 unknown）");
+			else bad("删除成功却还调了 archiveSession");
+			if (stores.calls.refreshed.length === 1) ok("connection 缺席时删完仍然重拉了列表基线");
+			else bad("connection 缺席时删完没重拉基线", String(stores.calls.refreshed.length));
 		}
-		await new Promise((resolve) => setImmediate(resolve));
-		const toast = document.body.querySelector(".dsh-ctx-toast");
-		const text = toast === null ? "" : toast.textContent;
-		if (!threw) ok("connection 缺席时点删除不抛异常");
-		else bad("connection 缺席时点删除抛了异常");
-		if (text.includes("插件通道")) ok("connection 缺席时给出明确原因（不是「点了没反应」）", text);
-		else bad("connection 缺席时提示不可读", text || "（无 toast）");
-		if (text.includes("is not a function")) bad("提示里泄漏了内部 TypeError（用户看不懂）", text);
-		else ok("提示里没有泄漏内部 TypeError");
-		if (stores.calls.archived.length === 0) ok("删除没成功时不摘掉列表行");
-		else bad("删除没成功却摘掉了列表行");
 	}
 
 	// ── 静态：模块作用域函数不许引用 t（R13） ──
@@ -1800,79 +2004,78 @@ await (async () => {
 
 	// ── 宿主半边没加载：必须翻译成「请重启 DSH」，不能把 405 原文甩给用户 ──
 	//
-	// 真实成因（app.asar 里逐行核过，别猜）：插件宿主半边把路由注册进
-	// connection 的 rpc 通道 /ui-tools；宿主进程只在**启动时**跑一次
-	// runProfile（dsh-desktop-host/lib/index.js 的 main），没有热重载。
-	// 装完插件不重启 DSH 时 /ui-tools 根本不存在，请求掉进
+	// 真实成因（真机日志 ~/.dsh/ui-tools-host.log 逐字记录过）：宿主进程只在
+	// **启动时**跑一次 runProfile，没有热重载。装完插件不重启 DSH 时，
+	// /api/ui-tools/sessionDelete 这条路由根本不存在，POST 掉进
 	// dsh-host-frontend-static 的 fallback ——
 	//   `if (req.method !== "GET" && req.method !== "HEAD") { res.writeHead(405); res.end(); }`
 	// 于是客户端拿到的是一个**非业务**的 405，而不是 {ok:false,error} 信封。
 	// 若原样显示，用户看到的是「删除失败：405」这种东西，根本不知道要去重启。
 	{
-		// 通道在、但服务端没有这个路由：rpc.call 直接 reject 一个 405。
 		const env = buildEnv();
 		const stores = makeStores();
-		const connection = {
-			rpc: {
-				call: () => {
-					const error = new Error("405 method not allowed");
-					error.status = 405;
-					return Promise.reject(error);
-				}
-			}
-		};
-		install(env, { sessions: stores.sessions, workspaces: stores.workspaces, uiWorkspace: stores.uiWorkspace, connection });
-		const tree = buildTree(env);
-		tree.sessionRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
-		document.body.querySelector(".dsh-ctx-menu").querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("删除会话")).dispatchEvent(makeEvent("click"));
-		document.body.querySelector(".dsh-ctx-confirm").querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("永久删除")).dispatchEvent(makeEvent("click"));
-		await new Promise((resolve) => setImmediate(resolve));
+		fetchRoutes.set("/api/ui-tools/sessionDelete", () => new Response("method not allowed", { status: 405 }));
+		try {
+			install(env, { sessions: stores.sessions, workspaces: stores.workspaces, uiWorkspace: stores.uiWorkspace, connection: stores.connection });
+			const tree = buildTree(env);
+			tree.sessionRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
+			document.body.querySelector(".dsh-ctx-menu").querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("删除会话")).dispatchEvent(makeEvent("click"));
+			document.body.querySelector(".dsh-ctx-confirm").querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("永久删除")).dispatchEvent(makeEvent("click"));
+			await new Promise((resolve) => setImmediate(resolve));
 		const toast = document.body.querySelector(".dsh-ctx-toast");
 		const text = toast === null ? "" : toast.textContent;
 		if (text.includes("宿主半边") && /重启|重装/.test(text)) ok("宿主路由缺失时提示指向「重启 DSH」而不是 405 原文", text.slice(0, 48));
 		else bad("宿主路由缺失时提示没指向重启 —— 用户看到的就是一句没头没脑的 HTTP 状态码", text || "（无 toast）");
+		} finally {
+			fetchRoutes.set("/api/ui-tools/sessionDelete", () => new Response(JSON.stringify({ ok: true, value: { ok: true } }), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			}));
+		}
 	}
 
-	// ── 负向对照：把 no-host 这个码改成别的，上面那条必须变红 ──
+	// ── 负向对照：把 404/405 → no-host 这条判定拆掉，上面那条必须变红 ──
 	{
-		// 只改「路由缺失 → no-host」这一处判定，让它永远不生效：
-		// 提示就退回成「删除失败：405 method not allowed」。
-		const brokenEnv = buildBrokenEnv("ctxCallSessionDelete", (text) => text.replace('failure.code = routeMissing ? "no-host" : "delete-failed";', 'failure.code = "delete-failed";'));
+		// v0.4.21 起判定在 ctxCallSessionDelete 的 `if (response.status === 404 || response.status === 405)`
+		// 与末尾 `.catch` 里两处。把 status 比较改成永不命中的 -1，
+		// 提示就退回成「删除失败：HTTP 405」。
+		const brokenEnv = buildBrokenEnv("ctxCallSessionDelete", (text) =>
+			text.replace(/response\.status === 404 \|\| response\.status === 405/g, "false")
+				.replace(/error\.status === 404 \|\| error\.status === 405/g, "false"));
 		const env = buildEnv(brokenEnv);
 		const stores = makeStores();
-		const connection = {
-			rpc: {
-				call: () => {
-					const error = new Error("405 method not allowed");
-					error.status = 405;
-					return Promise.reject(error);
-				}
-			}
-		};
-		install(env, { sessions: stores.sessions, workspaces: stores.workspaces, uiWorkspace: stores.uiWorkspace, connection });
-		const tree = buildTree(env);
-		tree.sessionRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
-		document.body.querySelector(".dsh-ctx-menu").querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("删除会话")).dispatchEvent(makeEvent("click"));
-		document.body.querySelector(".dsh-ctx-confirm").querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("永久删除")).dispatchEvent(makeEvent("click"));
-		await new Promise((resolve) => setImmediate(resolve));
-		const toast = document.body.querySelector(".dsh-ctx-toast");
-		const text = toast === null ? "" : toast.textContent;
-		if (!(text.includes("宿主半边") && /重启|重装/.test(text))) ok("负向对照：no-host 判定被拆掉后「重启提示」会变红（上面那条不是摆设）", text.slice(0, 48) || "（无 toast）");
-		else bad("负向对照失效：判定拆掉了提示依然是重启", text);
+		fetchRoutes.set("/api/ui-tools/sessionDelete", () => new Response("method not allowed", { status: 405 }));
+		try {
+			install(env, { sessions: stores.sessions, workspaces: stores.workspaces, uiWorkspace: stores.uiWorkspace, connection: stores.connection });
+			const tree = buildTree(env);
+			tree.sessionRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
+			document.body.querySelector(".dsh-ctx-menu").querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("删除会话")).dispatchEvent(makeEvent("click"));
+			document.body.querySelector(".dsh-ctx-confirm").querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("永久删除")).dispatchEvent(makeEvent("click"));
+			await new Promise((resolve) => setImmediate(resolve));
+			const toast = document.body.querySelector(".dsh-ctx-toast");
+			const text = toast === null ? "" : toast.textContent;
+			if (!(text.includes("宿主半边") && /重启|重装/.test(text))) ok("负向对照：no-host 判定被拆掉后「重启提示」会变红（上面那条不是摆设）", text.slice(0, 48) || "（无 toast）");
+			else bad("负向对照失效：判定拆掉了提示依然是重启", text);
+		} finally {
+			fetchRoutes.set("/api/ui-tools/sessionDelete", () => new Response(JSON.stringify({ ok: true, value: { ok: true } }), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			}));
+		}
 	}
 
-	// ── 静态：宿主半边 lib/index.js 必须真的注册了 /ui-tools 通道 ──
-	// 客户端叫 ctxCallSessionDelete，宿主叫 sessionDelete；两边常量各写各的，
-	// 一旦有一边改名，运行时就是「点了没反应」，而语法/断言全绿。
+	// ── 静态：宿主半边 lib/index.js 必须真的注册了删除路由 ──
+	// 客户端打 /api/ui-tools/sessionDelete，宿主用 DELETE_ROUTE_PATH 注册；
+	// 两边常量各写各的，一旦有一边改名，运行时就是「点了没反应」，而语法/断言全绿。
 	{
 		const hostPath = new URL("../lib/index.js", import.meta.url);
 		let hostText = "";
 		try { hostText = fs.readFileSync(hostPath, "utf8"); } catch { hostText = ""; }
-		const hasChannel = /['"]\/ui-tools['"]/.test(hostText);
-		const hasEndpoint = /sessionDelete/.test(hostText);
-		const hasRegister = /rpc\s*\.\s*handle\s*\(/.test(hostText);
-		if (hasChannel && hasEndpoint && hasRegister) ok("宿主半边注册了 /ui-tools 通道与 sessionDelete 端点（不是空壳）");
-		else bad(`宿主半边没注册路由（channel=${hasChannel} endpoint=${hasEndpoint} register=${hasRegister}）—— 删了磁盘但请求根本到不了`);
+		const hasPath = /DELETE_ROUTE_PATH = "\/api\/ui-tools\/sessionDelete"/.test(hostText);
+		const hasEndpoint = /sessionDelete/i.test(hostText);
+		const hasRegister = /connection\s*\.\s*fetch\s*\.\s*register\s*\(/.test(hostText);
+		if (hasPath && hasEndpoint && hasRegister) ok("宿主半边用 connection.fetch.register 注册了 /api/ui-tools/sessionDelete（不是空壳）");
+		else bad(`宿主半边没注册路由（path=${hasPath} endpoint=${hasEndpoint} register=${hasRegister}）—— 删了磁盘但请求根本到不了`);
 	}
 })();
 
