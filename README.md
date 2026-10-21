@@ -331,6 +331,8 @@ node tools/live-smoke.mjs <URL+token>   # 真机冒烟（可选；自动探测�
   - **根因**：真机实测（React fiber 遍历 + 逐帧采样）发现内核 `legacy` 快照里 assistant 节点的 `timing.firstTokenTime` **恒为 `null`** —— 连**刚流式生成完**的回合落地后也是 `null`（`stepStartTime` / `completedTime` / `usage.outputTokens` 都在）。内核只在 durable log / `sessionStats` projection 里保留首字时间，客户端窗口的 settled 节点拿不到（官方 `ActivityPill` 显示 70 tok/s 是走 `useProjection("sessionStats")`，不是 `deriveStats(nodes)`）。原 `tspFoldTurn` 硬要求 `firstTokenTime` 为数字，于是 `sampled` 恒 false → 返回 `null` → pill 消失。compat-check 的假节点自带了 `firstTokenTime`，所以再次假绿。
   - **修复**：`tspFoldTurn` 改为**两级口径**——① 若有带 `firstTokenTime` 的 step，仍按内核解码口径 `ΣoutputTokens ÷ Σ(completedTime − firstTokenTime)`（墙钟 step 不参与分母）；② 所有 step 都缺 `firstTokenTime` 时回退**整步墙钟**口径 `ΣoutputTokens ÷ Σ(completedTime − stepStartTime)`（含首字延迟，`legacy` 快照恒可得）。tooltip 与 README 明确标注口径差异。
   - **断言补钉**：compat-check 新增 4 条 —— 墙钟回退算出 50 tok/s、缺 `stepStartTime` 返回 `null`、有解码数据的 step 优先且不混墙钟分母、组件层「`firstTokenTime=null` 的已固化回合仍渲染 `⚡30 tok/s`」（真机回归钉）；**compat-check 85/85**。
+  - **真机验收**（`tools/live-smoke.mjs`，Edge + 自签 cookie 打真 GUI）：生成中 `⚡≈ 2xx tok/s · 生成中估算` 逐帧更新，**回合结束后仍有 `⚡87 tok/s` 常驻**（不再消失），位置探针 `{inDock:true, sameRow:true, rightOf:true}` —— 与官方「4 轮 249 步 · 166 tok/s」同一行、排在其右侧；**live-smoke 26/26 全 PASS**。
+  - **live-smoke 2c 重构**：原断言直接要求 `pill 文案 ^(≈ )?\d+ tok/s$`、且用「逐层向上找含『轮/步』的容器 + 叶子节点」推断行位置，在生成中估算形态与真实 DOM 结构下必然误判。改为 ① 文案正则允许 `⚡` 前缀与 `· 生成中估算` 长尾；② 位置用 `pill.closest("[data-composer-dock]")` + `[data-composer-stat="activity"]` 的 `getBoundingClientRect()` 直接比对（同行判定按中线 ±8px、右侧判定按左边缘），不再猜文本；③ 内核「用时」弹窗对照分三态（打不开 / 估算形态 / 可对照），避免把探测失败当产品缺陷；④ 估算形态额外断言 `role="status"`。
   - **版本**：`0.4.26 → 0.4.27`。
 
 - **v0.4.26**：修 v0.4.25 真机上速度计**根本不渲染**的根因。

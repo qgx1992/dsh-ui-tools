@@ -287,8 +287,10 @@ try {
 
 	console.log("\n2c. 功能五：输出速度计（输入框下方统计行，真机取数）");
 	{
-		// 回到「对话」视图：pill 挂在 composer 下方的统计行（「N 轮 M 步」那一行），
-		// 与官方 activity 统计 pill 同一行、排在其右侧（v0.4.25 从 assistant-actions 迁入）。
+		// pill 挂在 composer 下方的统计行（「N 轮 M 步」那一行），与官方 activity 统计
+		// pill 同一行、排在其右侧（v0.4.25 从 assistant-actions 迁入）。
+		// 注意：本环境的会话里可能正有一条回合在生成，此时 pill 会显示「≈ N tok/s · 生成中估算」，
+		// 这是设计行为，故位置/格式断言必须容忍估算形态。
 		const backToChat = await page.evaluate(() => {
 			const rows = [...document.querySelectorAll("button, [role=tab], [role=button]")]
 				.filter((el) => (el.textContent || "").trim() === "对话");
@@ -301,16 +303,17 @@ try {
 			return [...document.querySelectorAll(sel)].map((el) => ({
 				text: (el.textContent || "").trim(),
 				title: el.getAttribute("title") || "",
-				aria: el.getAttribute("aria-label") || ""
+				aria: el.getAttribute("aria-label") || "",
+				role: el.getAttribute("role") || "",
 			}));
 		}, MARKERS.tokenSpeedPill);
 
-		// 关键：不直接要求 pill 存在 —— 重载页面后历史回合缺 firstTokenTime，
-		// 内核自己的「本轮用时和速度」弹窗也**不显示 TPS**。因此这里断言的是
-		// 「与内核口径一致」：内核弹窗有 TPS 行则本插件必须有 pill，反之必须没有。
-		const kernelHasTps = await page.evaluate(async () => {
+		// 与内核「本轮用时和速度」弹窗口径对照（内核能算出 TPS 的回合，本插件应同样有读数；
+		// 内核算不出的历史回合，本插件也不会凭空造）。但「打不开弹窗」和「弹窗里没有 TPS」
+		// 是两件事，前者是探测失败，不能当成产品缺陷 —— 因此分三态处理。
+		const kernel = await page.evaluate(async () => {
 			const btn = [...document.querySelectorAll("button")].find((b) => /用时|Ran for/.test(b.textContent || ""));
-			if (!btn) return null;
+			if (!btn) return { found: false, hasTps: null, text: "" };
 			btn.click();
 			await new Promise((r) => setTimeout(r, 900));
 			const panel = document.querySelector("[data-turn-time-details]");
@@ -320,45 +323,55 @@ try {
 			document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
 			return { found: panel !== null, hasTps: /输出速度|Tokens per second/.test(text), text: text.slice(0, 80) };
 		});
-
-		if (kernelHasTps === null) {
-			check("（跳过）当前会话无「用时」pill，无法对照内核 TPS 口径", true, "no turn-time pill");
+		console.log(`     内核「用时」弹窗：${JSON.stringify(kernel)}`);
+		const isEstimate = pills.length > 0 && /≈/.test(pills[0].text);
+		if (kernel.found !== true) {
+			check("（跳过，信息）无法打开内核「用时」弹窗，本轮不校验 TPS 口径一致性", true, JSON.stringify(kernel));
+		} else if (isEstimate) {
+			check("（跳过，信息）pill 处于生成中估算形态，内核弹窗只覆盖已结束回合，本轮不校验口径一致性", true, pills[0].text);
 		} else {
-			console.log(`     内核「用时」弹窗：${JSON.stringify(kernelHasTps)}`);
 			check("功能五 pill 与内核 TPS 口径一致（内核有则必须有，内核无则必须无）",
-				kernelHasTps.hasTps ? pills.length > 0 : pills.length === 0,
-				`kernelHasTps=${kernelHasTps.hasTps} pills=${pills.length}`);
-			check("（跳过，信息）本回合是否可算 TPS", true, kernelHasTps.hasTps ? "可算（pill 应在场）" : "不可算（历史回合缺 firstTokenTime，内核同样不显示）");
+				kernel.hasTps ? pills.length > 0 : pills.length === 0,
+				`kernelHasTps=${kernel.hasTps} pills=${pills.length}`);
 		}
+
+		// 位置契约：必须落在 composer 下方的 dock 统计行里，且排在官方 activity
+		// （「N 轮 M 步」那枚）的右侧。直接拿 [data-composer-stat="activity"] 做基准，
+		// 比逐个 leaf 猜文本稳（官方 pill 内部结构是哈希类名，可能重构）。
+		const pos = await page.evaluate((sel) => {
+			const pill = document.querySelector(sel);
+			if (!pill) return { ok: "no-pill" };
+			const dock = pill.closest("[data-composer-dock]");
+			const official = dock ? dock.querySelector('[data-composer-stat="activity"]') : null;
+			if (!official) return { ok: "no-official", inDock: !!dock };
+			const pr = pill.getBoundingClientRect();
+			const or = official.getBoundingClientRect();
+			return {
+				ok: "ok",
+				inDock: true,
+				sameRow: Math.abs((pr.top + pr.bottom) / 2 - (or.top + or.bottom) / 2) <= 8,
+				rightOf: pr.left >= or.right - 1,
+				officialText: (official.textContent || "").trim().slice(0, 40),
+				dockText: (dock.textContent || "").trim().slice(0, 90),
+			};
+		}, MARKERS.tokenSpeedPill);
+		console.log(`     dock 位置探针：${JSON.stringify(pos)}`);
+
 		if (pills.length > 0) {
-			check("pill 文案形如「N tok/s」或估算「≈ N tok/s」", /^(≈ )?\d+(\.\d)? tok\/s$/.test(pills[0].text), pills[0].text);
+			// 精确值 `⚡N tok/s`，或生成中估算 `⚡≈ N tok/s · 生成中估算`（允许长尾说明）。
+			check("pill 文案形如「⚡N tok/s」或「⚡≈ N tok/s · 生成中估算」",
+				/^\u26a1\s*(≈\s*)?\d+(\.\d)? tok\/s(\s*·\s*.+)?$/.test(pills[0].text), pills[0].text);
 			check("pill 带可访问标签", pills[0].aria.length > 0, pills[0].aria);
-			// 位置契约：必须落在 composer 下方的 dock 统计行里，且与官方的「N 轮 M 步」
-			// activity pill 同行、排在其右侧（v0.4.25 布局：activity 0 → usage 1 → 本 pill 2）。
-			const pos = await page.evaluate((sel) => {
-				const pill = document.querySelector(sel);
-				if (!pill) return null;
-				// 找最近的、包含官方 activity 统计的容器（含「轮」「步」字样的行）。
-				let row = pill.parentElement;
-				for (let i = 0; i < 6 && row; i += 1) {
-					const txt = row.textContent || "";
-					if (/轮|stages|steps/.test(txt)) break;
-					row = row.parentElement;
-				}
-				if (!row) return null;
-				const kids = [...row.querySelectorAll("*")].filter((el) => el.children.length === 0);
-				const statEl = kids.find((el) => /轮|stages|steps/.test(el.textContent || ""));
-				return {
-					foundRow: true,
-					inSameRowAsStat: statEl !== undefined,
-					rightOfStat: statEl ? pill.getBoundingClientRect().left >= statEl.getBoundingClientRect().right - 1 : null,
-					rowText: (row.textContent || "").trim().slice(0, 80)
-				};
-			}, MARKERS.tokenSpeedPill);
-			check("pill 落在输入框下方统计行内、与「N 轮 M 步」同行（v0.4.25 dock 契约）",
-				pos !== null && pos.foundRow === true && pos.inSameRowAsStat === true, JSON.stringify(pos));
+			check("pill 落在输入框下方统计行（data-composer-dock）内，且与「N 轮 M 步」同一行（v0.4.25 dock 契约）",
+				pos.ok === "ok" && pos.inDock === true && pos.sameRow === true, JSON.stringify(pos));
 			check("pill 排在「N 轮 M 步」统计右侧（不覆盖官方控件）",
-				pos !== null && pos.rightOfStat === true, JSON.stringify(pos));
+				pos.ok === "ok" && pos.rightOf === true, JSON.stringify(pos));
+			if (isEstimate) {
+				check("生成中估算 pill 是 role=status 的 polite 区域",
+					pills[0].role === "status", pills[0].role);
+			}
+		} else {
+			check("（信息）本会话当前没有可显示的回合读数，pill 缺席", true, "no pills");
 		}
 		// 生成中估算条已并入 dock pill（同名 [data-tsp-pill]），不再有独立节点。
 		const liveCount = await page.evaluate(() => document.querySelectorAll("[data-tsp-live]").length);
