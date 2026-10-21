@@ -748,11 +748,19 @@ section("B. 新内核（提供 uiConversation）：六个功能全部生效");
 			["功能三 WSC_CSS", "[data-wsc-chip]"],
 			["功能四 SET_CSS", "[data-set-root]"],
 			["功能五 TSP_CSS", "[data-tsp-pill]"],
-			["功能七 TSW_CSS", "[data-ui-tools-todo-sweep]"]
+			// 功能七的哨兵必须落在「真正隐藏面板的那条规则」上：只查
+			// `[data-ui-tools-todo-sweep]` 会被 `html[data-ui-tools-todo-sweep]`
+			// 前缀单独命中，于是把 `{display:none !important}` 删掉也能假绿
+			// （v0.4.28 负向对照实测踩到）。改查目标选择器本体。
+			["功能七 TSW_CSS", "[data-testid=\"todo-panel\"]"]
 		];
 		const missing = sentinels.filter(([, needle]) => !css.includes(needle)).map(([label]) => label);
 		check("共享样式标签含全部六份 CSS 哨兵（v0.4.28 起含 TSW_CSS）",
 			missing.length === 0, missing.length === 0 ? "六份齐全" : `缺失：${missing.join("、")}`);
+		// 光有目标选择器还不够：必须真的带 display:none !important 才叫「隐藏」。
+		const tswRule = /html\[data-ui-tools-todo-sweep\]\s*\[data-testid="todo-panel"\]\s*\{[^}]*display\s*:\s*none\s*!important[^}]*\}/.test(css);
+		check("功能七 TSW_CSS 隐藏规则完整（作用域 + 目标 + display:none !important）",
+			tswRule, tswRule ? "规则完整" : "规则缺失或未带 display:none !important");
 		check("不再存在功能二的独立 style 标签（id 已废弃）",
 			!styleTags.some((node) => node.id === "dsh-ui-tools-wc-collapse-style"),
 			styleTags.map((node) => `id=${String(node.id)}`).join(", ") || "（无 id）");
