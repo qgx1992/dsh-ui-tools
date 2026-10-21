@@ -39,7 +39,7 @@ DSH Web 插件：六个 UI 工具合并成一个包，只动对应控件，不�
 
 **实现原理**：注册进官方 **`settings.section`**（root 作用域 list 槽），`id: "dsh-ui-tools"`、`order: 100`、`label` 走双语文案，设置导航自动出现该页。页面组件订阅同一个 localStorage 偏好仓库（`useSyncExternalStore`），所有开关写入即落盘；既有功能在 `apply()` 里注入同一偏好仓库：徽章/速度计组件渲染时读开关，侧边栏折叠条在插件加载时按「默认折叠」偏好执行一次。
 
-## 功能五：输出速度计 tok/s（v0.4.6 新增；v0.4.25 迁到输入框下方统计行）
+## 功能五：输出速度计 tok/s（v0.4.6 新增；v0.4.25 迁到输入框下方统计行；v0.4.27 修结算后消失）
 
 在**输入框下方**官方统计行（即「**N 轮 M 步**」那一行，与官方的 activity / usage 统计 pill 同一行）右侧，增加一个常驻的输出速度读数：
 
@@ -48,7 +48,12 @@ DSH Web 插件：六个 UI 工具合并成一个包，只动对应控件，不�
 
 > **与官方底部统计的关系**：官方那一行里的 TPS 是**全会话**口径（全程 `decodeTokens ÷ decodeMs`），本 pill 是**本回合 / 最近一回合**口径 —— 两者互补，本 pill 作为**新增**控件注册（`id: "ui-tools-token-speed"`、`order: 2`，排在官方 `activity`(0) / `usage`(1) 之后），不替换、不覆盖官方任何控件。
 
-数值口径（**精确值**）与内核「本轮用时和速度」弹窗里的 TPS **完全同源**：先定位回合（生成中以外取**最大回合**，`tspLastTurnSpeed`；按 `messageId` 的 `tspTurnSpeed` 仍保留以兼容既有断言），再折叠该回合全部已固化 assistant 节点，只累计**同时带 `timing.firstTokenTime` 与 `usage.outputTokens`** 的 step，按 `ΣoutputTokens ÷ Σ(completedTime − firstTokenTime)` 求值（对应内核 `deriveTurnMetrics` / `assistantStepReading`）；数据不足（无可计步、解码时长为 0）时**不显示**，绝不猜一个假值。
+数值口径（**精确值**）与内核「本轮用时和速度」弹窗里的 TPS **同源**：先定位回合（生成中以外取**最大回合**，`tspLastTurnSpeed`；按 `messageId` 的 `tspTurnSpeed` 仍保留以兼容既有断言），再折叠该回合全部已固化 assistant 节点。折叠是**两级口径**（v0.4.27 起）：
+
+1. **解码口径**（首选，与内核 `deriveTurnMetrics` / `assistantStepReading` 完全一致）：只累计**同时带 `timing.firstTokenTime` 与 `usage.outputTokens`** 的 step，按 `ΣoutputTokens ÷ Σ(completedTime − firstTokenTime)` 求值；只要该回合存在这类 step，就只用这批算，不让墙钟 step 污染分母。
+2. **整步墙钟口径**（回退）：真机实测发现内核 `legacy` 快照里的 assistant 节点 `timing.firstTokenTime` **恒为 `null`**（连刚流式生成完的回合也是 —— 内核只在 durable log / `sessionStats` projection 里保留首字时间，客户端窗口的 settled 节点拿不到；官方 `ActivityPill` 因此走 `useProjection("sessionStats")` 而非 `deriveStats(nodes)`）。故所有 step 都缺 `firstTokenTime` 时，回退到 `ΣoutputTokens ÷ Σ(completedTime − stepStartTime)`（**含首字延迟**，数值略低于纯解码速度，tooltip 已注明）。这是历史 / 已固化回合**唯一能算**的速度，保证结算后读数不消失。
+
+两种口径都算不出（无合法 step、时长为 0）时**不显示**，绝不猜一个假值。
 
 **为什么生成中只能给估算值**：内核在流式期间**不上报 token 数** —— `assistant/live-chunk` 里的 `usage` chunk 被 `publication: "none"` 抑制，不推给客户端。所以生成中改为读 chat 快照里的 `legacy.partial`（内核在 assistant-step 运行期持续发布的 `{turn, step, blocks}`），按已输出字符折算（CJK 1 字符 ≈ 1 token，其余 4 字符 ≈ 1 token；`tspBlocksEffort` 统计 text / reasoning 正文与 tool-call 的 name+argsRaw），分母只计相邻增量之间的真实出字时间（间隔超过 `TSP_LIVE_GAP_CAP_MS`=1000ms 的停顿视为等工具/等请求、不计入），并**始终带「≈」与「生成中估算」标注**，与精确值明确区分；回合一旦结束（`partial` 消失）即让位给精确值，不重复显示。有效出字时间 < 250ms 或折算 token 为 0 时**不显示估算**，避免爆表读数。
 
@@ -58,7 +63,7 @@ DSH Web 插件：六个 UI 工具合并成一个包，只动对应控件，不�
 
 **开关**：设置页「在输入框下方「几轮几步」旁显示输出速度计（tok/s）」，默认开；偏好字段 `tokenSpeedEnabled`（同一个 localStorage key）。旧内核上该开关灰显。
 
-> **历史回合为什么可能没有读数**：`firstTokenTime` 来自流式增量（瞬态事件，不进持久化日志），因此**重新加载页面后看到的历史回合**通常缺该字段——此时精确值不可得，插件与内核「用时」弹窗**都不显示 TPS**（同一口径、同一结论）。在本回合刚跑完、未重载页面的情况下读数正常。
+> **历史回合的读数口径（v0.4.27 修正）**：早期版本认为「`firstTokenTime` 不进持久化日志、重载后历史回合没有读数」。真机实测否定了这一假设：`legacy` 快照里的 `firstTokenTime` **在真机上恒为 `null`**（与是否重载无关），所以只靠解码口径会让**每个回合结算后**都失去读数（生成中能看到、一结束就消失）。v0.4.27 起改为「解码优先、墙钟回退」两级口径：历史回合显示的是**整步墙钟速度**（含首字延迟，通常略低于纯解码速度），而不是不显示。
 
 ## 功能六：会话 / 工作区列表右键菜单（v0.4.13 新增）
 
@@ -286,7 +291,7 @@ ctx.inject(["sessions", "workspaces"], (scope) => {
 - 该区间已对 npm 上全部 **29 个**已发布内核版本 + 3 个未来哨兵逐项断言，并保证普通 semver 语义与市场侧 `includePrerelease` 语义**判决一致**（见下「自检」）。
 - **v0.4.8 修正**：此前区间写作 `… || >=0.1.6-0`，其末项在**普通语义**下**不覆盖**任何 `0.1.7-*` / `0.2.0-*` 预发布版（只在 `includePrerelease` 下才成立），实测有 **6 条分流**（`0.1.7-alpha.1/2`、`0.1.7-rc.1/2`、`0.2.0-rc.1/2`）。原因同上一节：预发布版只与同 `x.y.z` 的元组比较，而 `>=0.1.6-0` 的下界落在 0.1.6 线。更隐蔽的是——当时 0b 的版本表**只列了 21 个**，恰好漏掉整条 0.1.7/0.2.0 线，于是「两种语义判决一致」那条断言**假绿**。现改为逐条发布线 `^0.1.6-0 || ^0.1.7-0 || ^0.2.0-0 || >=0.3.0-0` 并**全量列表**，令同类裂缝无处可藏。
 
-> **验证口径**：`node tools/compat-check.mjs` 跑在本机已装内核副本的**真实 cordis** 上（v0.4.26 实测 **81/81** 全绿；断言计数随内核枚举动态变化，门槛是**零 FAIL** 而非某个具体数字，因此别把它当固定指标读。另注意它需要 `DSH_CORDIS_ENTRY` / `DSH_SEMVER_ENTRY` 指向可用的 cordis 与 semver——本机可指向仓库内 `.scratch/kernel/...`），场景断言五个功能的槽位注册、子 fiber 状态与 boot 审计口径；B3 自 v0.4.25 起改为「Definition 通道已移除」的源码反向钉（不再逐内核驱动装配器）。真机（浏览器）行为另由 `tools/live-smoke.mjs` 覆盖，需自备 URL+token。
+> **验证口径**：`node tools/compat-check.mjs` 跑在本机已装内核副本的**真实 cordis** 上（v0.4.27 实测 **85/85** 全绿；断言计数随内核枚举动态变化，门槛是**零 FAIL** 而非某个具体数字，因此别把它当固定指标读。另注意它需要 `DSH_CORDIS_ENTRY` / `DSH_SEMVER_ENTRY` 指向可用的 cordis 与 semver——本机可指向仓库内 `.scratch/kernel/...`），场景断言五个功能的槽位注册、子 fiber 状态与 boot 审计口径；B3 自 v0.4.25 起改为「Definition 通道已移除」的源码反向钉（不再逐内核驱动装配器）。真机（浏览器）行为另由 `tools/live-smoke.mjs` 覆盖，需自备 URL+token。
 
 > **profile 安装漂移**：`tools/check-profile-drift.mjs` 会比对 `~/.dsh/profiles/*/` 三处口径——`package.json` 的声明、`pnpm-lock.yaml` 的 specifier 与 resolved 版本、`node_modules` 里实际安装的版本。三者不一致时必须先修 profile，否则「改了代码、刷新页面、毫无变化」——因为真实 GUI 跑的是 profile 里的安装副本，而 `compat-check.mjs` 读的**永远是仓库 `lib/client.js`**，两者是两份文件。
 
@@ -321,7 +326,14 @@ node tools/live-smoke.mjs <URL+token>   # 真机冒烟（可选；自动探测�
 
 ## 变更记录
 
-- **v0.4.26（本次）**：修 v0.4.25 真机上速度计**根本不渲染**的根因。
+- **v0.4.27（本次）**：修「回合结束后速度计整个消失」（v0.4.26 装到真机后的现象）。
+  - **现象**：生成中能看到 `⚡≈ 245 tok/s · 生成中估算`，**回合一旦结束 pill 就消失**，统计行只剩官方 activity / usage 两枚。
+  - **根因**：真机实测（React fiber 遍历 + 逐帧采样）发现内核 `legacy` 快照里 assistant 节点的 `timing.firstTokenTime` **恒为 `null`** —— 连**刚流式生成完**的回合落地后也是 `null`（`stepStartTime` / `completedTime` / `usage.outputTokens` 都在）。内核只在 durable log / `sessionStats` projection 里保留首字时间，客户端窗口的 settled 节点拿不到（官方 `ActivityPill` 显示 70 tok/s 是走 `useProjection("sessionStats")`，不是 `deriveStats(nodes)`）。原 `tspFoldTurn` 硬要求 `firstTokenTime` 为数字，于是 `sampled` 恒 false → 返回 `null` → pill 消失。compat-check 的假节点自带了 `firstTokenTime`，所以再次假绿。
+  - **修复**：`tspFoldTurn` 改为**两级口径**——① 若有带 `firstTokenTime` 的 step，仍按内核解码口径 `ΣoutputTokens ÷ Σ(completedTime − firstTokenTime)`（墙钟 step 不参与分母）；② 所有 step 都缺 `firstTokenTime` 时回退**整步墙钟**口径 `ΣoutputTokens ÷ Σ(completedTime − stepStartTime)`（含首字延迟，`legacy` 快照恒可得）。tooltip 与 README 明确标注口径差异。
+  - **断言补钉**：compat-check 新增 4 条 —— 墙钟回退算出 50 tok/s、缺 `stepStartTime` 返回 `null`、有解码数据的 step 优先且不混墙钟分母、组件层「`firstTokenTime=null` 的已固化回合仍渲染 `⚡30 tok/s`」（真机回归钉）；**compat-check 85/85**。
+  - **版本**：`0.4.26 → 0.4.27`。
+
+- **v0.4.26**：修 v0.4.25 真机上速度计**根本不渲染**的根因。
   - **现象**：v0.4.25 装进 desktop profile 后，输入框下方统计行只有官方 activity / usage 两个 pill，插件的 `[data-tsp-pill]` 始终为 0（compat-check 却全绿）。
   - **根因**：`conversation.composer.dock` 是 **session 作用域** 槽，`sessionId` 由内核槽框架作为**标准 props** 注入组件（官方 `ActivityPill` 直接 `useChat(s => s.legacy.nodes)` 即证据；同插件 `WorkspaceNameChip` 也是从 props 解构 `sessionId`，而它的 `inject` 只返回 `{ prefs }`、**不收参数**）。v0.4.25 误写成 `inject: (sessionId) => ({ hooks: { tspChat: tspChatSource(ctx, sessionId) } })`，真机上该形参恒为 `undefined` → `ctx.uiConversation.binding(undefined)` 抛错 → 走空快照兜底 → 组件 `legacy` 恒空 → 永远 `return null`。compat-check 的假 kernel 自己造了 sessionId 并直接喂 `useTspChat`，所以假绿、测不出。
   - **修复**：注册改为 `inject: () => ({ prefs })`；`TokenSpeedDockPill` 优先取内核**标准 props 的 `useChat`**（`useChat(sel)` 与官方同款，`sel(s).legacy.nodes` / `.legacy.partial` 均可读），`useTspChat` 仅保留作单元测试兜底（真机不存在，取不到就走 `useChat`）。`tspChatSource` 保留未删（历史通道，无人调用不再影响渲染）。

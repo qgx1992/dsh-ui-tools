@@ -785,6 +785,27 @@ section("B2. 功能五：输出速度计（dock 统计行 pill：末回合精确
 			speed.tspLastTurnSpeed([]) === null && speed.tspLastTurnSpeed(void 0) === null);
 	}
 
+	// 真机事实（v0.4.26 修复的 bug）：内核 legacy 快照里的 assistant 节点
+	// `timing.firstTokenTime` 恒为 null（连刚生成完的回合也是）。此时必须回退到
+	// 「整步墙钟」口径，否则回合结束后精确值恒为 null、pill 整块消失。
+	{
+		const restored = [
+			{ kind: "assistant", turn: 1, messageId: "r1", timing: { stepStartTime: 1000, firstTokenTime: null, completedTime: 5000 }, usage: { outputTokens: 200 } }
+		];
+		check("firstTokenTime 为 null（历史/已固化回合）时回退整步墙钟口径：200 ÷ 4s = 50",
+			speed.tspLastTurnSpeed(restored) === 50, String(speed.tspLastTurnSpeed(restored)));
+		check("firstTokenTime 为 null 且缺 stepStartTime 时返回 null（不猜）",
+			speed.tspLastTurnSpeed([{ kind: "assistant", turn: 1, timing: { firstTokenTime: null, completedTime: 5000 }, usage: { outputTokens: 200 } }]) === null);
+		// 优先解码口径：同一回合里既有带 firstTokenTime 的 step，也有只有墙钟的 step
+		// → 只用解码口径那批（100 tok / (3000-1000)ms = 50），不让墙钟 step 污染分母。
+		const mixed = [
+			{ kind: "assistant", turn: 1, timing: { stepStartTime: 0, firstTokenTime: 1000, completedTime: 3000 }, usage: { outputTokens: 100 } },
+			{ kind: "assistant", turn: 1, timing: { stepStartTime: 3000, firstTokenTime: null, completedTime: 9000 }, usage: { outputTokens: 900 } }
+		];
+		check("有 firstTokenTime 的 step 存在时优先解码口径（墙钟 step 不参与分母）",
+			speed.tspLastTurnSpeed(mixed) === 50, String(speed.tspLastTurnSpeed(mixed)));
+	}
+
 	check("无该 messageId 时返回 null（不猜、不显示）", speed.tspTurnSpeed([{ kind: "assistant", turn: 1, messageId: "x", timing: {}, usage: {} }], "nope") === null);
 	check("解码时长为 0 时返回 null（避免除零得 Infinity）",
 		speed.tspTurnSpeed([{ kind: "assistant", turn: 1, messageId: "m1", timing: { firstTokenTime: 5, completedTime: 5 }, usage: { outputTokens: 10 } }], "m1") === null);
@@ -840,6 +861,20 @@ section("B2. 功能五：输出速度计（dock 统计行 pill：末回合精确
 			TokenSpeedDockPill({ useTspChat, t, prefs: off }) === null);
 		check("dock pill：无任何可算数据时渲染 null（不显示假值）",
 			TokenSpeedDockPill({ useTspChat: (sel) => sel({ legacy: { nodes: [] } }), t, prefs: on }) === null);
+
+		// 真机形态（v0.4.26 bug 回归钉）：settled 节点 firstTokenTime=null、只有
+		// stepStartTime/completedTime —— 必须回退墙钟口径仍然渲染，否则真机上
+		// 每回合结束后 pill 都会消失（生成中能看到、一结束就没了）。
+		const restoredNodes = [
+			{ kind: "assistant", turn: 1, messageId: "r1", timing: { stepStartTime: 0, firstTokenTime: null, completedTime: 4000 }, usage: { outputTokens: 120 } }
+		];
+		const restoredEl = TokenSpeedDockPill({
+			useTspChat: (sel) => sel({ legacy: { nodes: restoredNodes } }),
+			t,
+			prefs: on
+		});
+		check("dock pill：firstTokenTime=null 的已固化回合仍显示精确值（墙钟回退，真机回归钉）",
+			flatten(restoredEl) === "⚡30 tok/s", String(flatten(restoredEl)));
 
 		// 标准 props 路径（真机唯一可靠来源）：dock 是 session 作用域槽，内核通过
 		// uiSession.provide({hooks:["chat"]}) 给组件注入 useChat（官方 ActivityPill
