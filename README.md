@@ -105,7 +105,9 @@ DSH Web 插件：六个 UI 工具合并成一个包，只动对应控件，不�
 - **失败不装作成功。** 服务端拒绝（not found / forbidden / 落盘定位失败）时把**真实原因**显示给用户，且**不摘掉列表行**——避免「看起来删了其实还在」。通道缺席时同样给可读提示，不泄漏内部 `TypeError`。
 - **宿主路由不存在时说「请重启 DSH」，不说 HTTP 状态码。** 宿主进程只在**启动时**装配一次 profile（`dsh-desktop-host` 的 `main()` 里跑一遍 `runProfile`），没有热重载。装完插件不重启，`/api/ui-tools/sessionDelete` 这条路由根本不存在：`/api` 前缀路由在、精确子路由不在，于是内核回 **404**（若整条 `/api` 都没挂则掉进 `frontend-static` 兜底的 **405**）。所以客户端把这两种**非业务**状态码统一识别成 `no-host`，提示「插件宿主半边未加载（宿主进程只在启动时装配插件）……请重启 DSH 后重试」。**否则用户看到的是一句没头没脑的 `删除失败：405 method not allowed`，根本不知道该去重启。**
 
-> ⚠ **已知边界**：正在生成中的会话被删后，宿主 agent 可能在收尾时重建日志（插件已尽力先 `cancel`，但这是尽力而为）；本功能**不级联删除子会话分支**；工作区里残留的 id 由内核下次对账时自愈（`groupByWorkspace` 对 `list.byId[id] === undefined` 直接跳过，不会渲染死账）。
+> ⚠ **已知边界**：正在生成中的会话被删后，宿主 agent 可能在收尾时重建日志（插件已尽力先 `cancel`，但这是尽力而为）；工作区里残留的 id 由内核下次对账时自愈（`groupByWorkspace` 对 `list.byId[id] === undefined` 直接跳过，不会渲染死账）。
+>
+> ✅ **v0.4.23 起会级联删除子会话分支**（见下节「子会话级联」），并且删除过程有逐条进度。
 >
 > ⚠ **装完必须重启 DSH**（不是刷新页面）。宿主半边是新写进 `lib/index.js` 的，只同步文件不重启，菜单会出现但点了只会提示「宿主半边未加载」。
 
@@ -120,6 +122,26 @@ DSH Web 插件：六个 UI 工具合并成一个包，只动对应控件，不�
 - **确认条点名数量。** 「删除「项目一」的全部 5 个会话？」+ 「这些会话记录会从磁盘上永久删除，无法撤销。工作目录里的文件不受影响。」——明确区分「删会话记录」与「删工作目录文件」，避免用户以为会把代码目录一起端掉。id 列表为空时点下去只给一句提示，不弹确认条。
 
 > ⚠ 与单会话删除同一条已知边界：正在生成中的会话、以及会话分支的子会话不会被级联处理。
+
+### 子会话级联删除（v0.4.23 新增）
+
+**「创建会话分支」建出来的子会话，单独删父会话会留下孤儿分支**——它们仍在列表里、仍占磁盘，但已经失去了上游上下文。v0.4.23 起删父会话时会**连整棵子树一起删**。
+
+- **血缘链完全在客户端就能算出来，不需要新 RPC。** 逐行核过内核：`dsh-session:2017` fork 时写入 `header.parentSession` → `dsh-api-session-controller:2129` 投影成条目字段 `parentSessionId` → 客户端 `service.js:512` 再投影成摘要的 **`parentId`**。也就是说 `sessions.list.getSnapshot().items` 里每条摘要本来就带 `parentId`，拼成 `parentId → [childId]` 就能 BFS 出整棵子树。新增的纯函数 `ctxDescendantSessionIds(sessions, parentIds)` 就干这件事：多根、多兄弟、**血缘成环（脏数据）不死循环**、快照读不到时返回 `[]`（级联是附加能力，绝不能因为它而弄坏删除本身）。
+- **确认条必须说清楚要多删几个。** 有子会话时正文换成「该会话下还有 N 个子会话分支，会一并删除。」——**在用户点『永久删除』之前**就把级联的代价摊开，而不是删完再告诉人家。没有子会话时逐字沿用旧文案，不吓唬人。
+- **有子会话就走批量/流式端点，没有就走单会话端点。** 单会话端点一次只能删一个，级联必须多次往返；所以有子树时改调 `/api/ui-tools/sessionsDeleteStream`。没有子树时**载荷逐字不变**（仍只发 `{sessionId, cwd}`），v0.4.20 的老契约一个字没改。
+- **工作区批量删除也会顺手把「跨工作区的子会话」带上。** 一个从 w1 的会话 fork 出来、后来被归到 w2 的子会话，在 w1 的 `sessionIds` 里是看不到的——只按 `sessionIds` 删就会漏。所以工作区删除同样先做一次级联展开再取并集，确认条上的数字是**展开后**的真实条数。
+- **`origin` 字段不参与判据。** 内核 `dsh-session:1053` 里 `origin` 只允许 `"subagent"`，但用户手动 fork 出来的分支 `origin` 是空的；只认 `origin` 会漏掉手动分支，故判据只用 `parentId`。
+
+### 批量删除进度（v0.4.23 新增）
+
+删 20 个会话在真机上要好几秒（每个都要先停 agent、再动工作区记账、最后递归删目录）。这期间如果界面只有一句「正在删除…」，用户会以为卡死并反复点击。
+
+- **宿主逐条推进度，客户端逐条刷提示。** 新路由 `/api/ui-tools/sessionsDeleteStream` 返回 **NDJSON**（`application/x-ndjson`，一行一个 JSON），`deleteSessions()` 每删完一个就 `onProgress({done, total, sessionId, ok, code?, message?})`，宿主随即写出 `{"type":"progress", …}`；全部结束后写 `{"type":"done", …}`（内容是和非流式端点完全一致的 `deleteEnvelope()`）。
+- **为什么是 NDJSON 而不是 SSE。** `EventSource` 只能发 GET、带不了请求体，而这条端点必须收 `sessions` 数组；所以用 `fetch` + `ReadableStream` 手切行。响应头带 `x-accel-buffering: no`，防止中间层把流攒起来一次性吐出（那样进度就成了假的）。
+- **进度是真的数出来的，不是按时间估的。** 断言直接钉住「3 个会话 → 恰好 3 次进度回调」且 `done` 逐次为 `1,2,3`，并附带静态钉「宿主 `deleteSessions` 里必须有 `onProgress({done:` 调用」+ 文本变异负向对照。
+- **老宿主自动降级。** 如果这个进程还是 v0.4.22 的旧半边（没有流式路由，返回 404/405），客户端会**立刻退回去打一次性批量端点**，删除照常成功、只是没有进度。断言把这条降级路径单独跑了一遍。
+- **客户端断开不等于删除要停。** 流写到一半用户关标签页，`controller.enqueue` 会抛错；宿主把它吞掉并继续把剩余的删完——中止到一半留下的半删状态比多删几秒更难收拾。
 
 ### ⚠ 为什么用 `connection.fetch` 而不是 `connection.rpc`
 
@@ -267,7 +289,7 @@ node tools/live-smoke.mjs <URL+token>   # 真机冒烟（可选；自动探测�
 
 `tools/check-hooks-order.mjs` 专治一类**只在特定状态切换时才炸**的崩溃：React 靠「Hook 调用顺序 + 数组下标」识别 Hook，而它**从不清空 hook 数组**，只按 `hookIndex++` 覆盖——于是 `if (!cond) return null;` 夹在两个 Hook 之间时，`cond` 为假的那次渲染里后续 Hook 槽位残留上一次的值（若上次该槽是 `undefined`，卸载时 React 执行 `destroy()` 直接抛 `undefined is not a function`）。脚本用纯词法扫描（不引入 babel/typescript，守 R6）切出每个函数组件的函数体、跟踪最外层 `return` 与 `useXxx(` 调用的相对位置，命中即 FAIL；并自带双向负向对照（违规样例必红 + 合规写法不误报），确保断言本身不会退化成同义反复。
 
-`tools/check-context-menu.mjs` 用**手写 DOM 测试台**（零依赖，不引 jsdom）跑功能六的 171 条断言：从 `lib/client.js` 里按花括号配平**取出真实函数**注入沙箱执行，并把 `CTX_ZH` 词典求值出来做文案核对（断言看的是用户真正会看到的字，不是 stub 返回的键名）。覆盖判据识别（含「工作区行不被误判成会话行」）、三级降级与**标题歧义必须返回 null**、菜单组装与空菜单拒绝、三类目标的右键分发、键盘与外部点击、卸载后三类监听全部解绑且补丁摘干净、**动作真的调到官方服务而非空壳**、动作抛错不冒泡、不引用参考插件包名、CSS 并入共享标签、开关门控语义，以及 v0.4.20 的**删除会话全链路**（二次确认不可跳过、载荷字段逐字正确、宿主半边路由常量与客户端一致、`connection.fetch.register` 而非裸路由**也非不可用的 `rpc.handle`**、可选服务确实没进 `inject`、删完不调 `archiveSession` 而调 `stopSessionActivity` + `clearMain` + `refresh`、失败不摘行、通道缺席给可读原因）。v0.4.21 起沙箱额外注入 `location` 与 `fetch` 两个形参（Node 无全局 `location`；不注入 `fetch` 时相对 URL 会直接 `TypeError: Failed to parse URL`，断言只能看到同一句无意义报错），并用可编程的 `fetchRoutes` 路由表模拟宿主行为 —— 未注册路径回 405 就是「宿主没重启」的真实形状。**`calls.deleted` 与 `fetchCalls` 是同一个数组，且它全局共享**：负向对照必须先 `const since = fetchCalls.length` 再 `slice(since)` 取新记录，否则读到的是上一个用例的正常 URL，对照会假绿（踩过）。**负向对照必须真的变红**：判据改坏的方式是把源码文本改掉后重新编译沙箱（给 `env.ctxSessionRowId` 重新赋值是**无效**的——闭包内的调用走词法绑定，改不到；这一点本身就是踩过的坑）。另外，凡是「代码里不许出现 X」的断言都先**剥离注释**再比对，否则文件顶部写明「参考插件：@baihejiangnan/…」「无 MutationObserver」会把注释当代码判红。
+`tools/check-context-menu.mjs` 用**手写 DOM 测试台**（零依赖，不引 jsdom）跑功能六的 196 条断言：从 `lib/client.js` 里按花括号配平**取出真实函数**注入沙箱执行，并把 `CTX_ZH` 词典求值出来做文案核对（断言看的是用户真正会看到的字，不是 stub 返回的键名）。覆盖判据识别（含「工作区行不被误判成会话行」）、三级降级与**标题歧义必须返回 null**、菜单组装与空菜单拒绝、三类目标的右键分发、键盘与外部点击、卸载后三类监听全部解绑且补丁摘干净、**动作真的调到官方服务而非空壳**、动作抛错不冒泡、不引用参考插件包名、CSS 并入共享标签、开关门控语义，以及 v0.4.20 的**删除会话全链路**（二次确认不可跳过、载荷字段逐字正确、宿主半边路由常量与客户端一致、`connection.fetch.register` 而非裸路由**也非不可用的 `rpc.handle`**、可选服务确实没进 `inject`、删完不调 `archiveSession` 而调 `stopSessionActivity` + `clearMain` + `refresh`、失败不摘行、通道缺席给可读原因）。v0.4.21 起沙箱额外注入 `location` 与 `fetch` 两个形参（Node 无全局 `location`；不注入 `fetch` 时相对 URL 会直接 `TypeError: Failed to parse URL`，断言只能看到同一句无意义报错），并用可编程的 `fetchRoutes` 路由表模拟宿主行为 —— 未注册路径回 405 就是「宿主没重启」的真实形状。**`calls.deleted` 与 `fetchCalls` 是同一个数组，且它全局共享**：负向对照必须先 `const since = fetchCalls.length` 再 `slice(since)` 取新记录，否则读到的是上一个用例的正常 URL，对照会假绿（踩过）。**负向对照必须真的变红**：判据改坏的方式是把源码文本改掉后重新编译沙箱（给 `env.ctxSessionRowId` 重新赋值是**无效**的——闭包内的调用走词法绑定，改不到；这一点本身就是踩过的坑）。另外，凡是「代码里不许出现 X」的断言都先**剥离注释**再比对，否则文件顶部写明「参考插件：@baihejiangnan/…」「无 MutationObserver」会把注释当代码判红。
 
 > ⚠ **测试台的一个时间陷阱（v0.4.20 踩到）**：沙箱把 `setTimeout` 注入成 `(fn) => realSetTimeout(fn, 0)`，即**立刻执行**。而 `ctxToast` 用 `window.setTimeout(..., 1800)` 清理旧提示——真实浏览器里 1800ms 远大于微任务，但沙箱里那个清理回调会和新提示挤在同一批微任务里、并且**后执行**，于是一次 `.dsh-ctx-toast` 全扫会把刚落地的「已删除…」也删掉（断言看到的是空）。**规程**：凡断言「提示文案」的地方，让出**宏任务**（`await new Promise((r) => setImmediate(r))`）而不是若干次 `await Promise.resolve()`。
 
@@ -283,14 +305,24 @@ node tools/live-smoke.mjs <URL+token>   # 真机冒烟（可选；自动探测�
 
 ## 变更记录
 
-- **v0.4.22（本次）**：新增**「删除工作区全部会话」**，并修掉 v0.4.21 遗留的**致命 `peer` 参数 bug**。
+- **v0.4.23（本次）**：给「删除会话」补上两块真机上最缺的东西——**子会话级联**与**逐条进度**。
+  - **新功能一：子会话级联删除。** 删父会话时把整棵分支子树一起删掉，确认条提前说明「会一并删除 N 个子会话分支」。血缘链不需要新 RPC：`dsh-session:2017` 的 `header.parentSession` → `api-session-controller:2129` 的 `parentSessionId` → 客户端 `service.js:512` 的摘要字段 `parentId`，客户端自己 BFS 就能算。判据**只用 `parentId`，不看 `origin`**（内核 `dsh-session:1053` 里 `origin` 只允许 `"subagent"`，用户手动 fork 的分支是空的，认它会漏）。
+  - **新功能二：批量删除逐条进度。** 新增 NDJSON 流式路由 `DELETE_STREAM_ROUTE_PATH = "/api/ui-tools/sessionsDeleteStream"`，`deleteSessions()` 每删完一个就 `onProgress({done, total, sessionId, ok})`，客户端每收到一行 progress 就刷一次「正在删除 3/20…」，结束时推一行 `done`（内容与非流式端点共用同一个 `deleteEnvelope()`）。用 NDJSON 而不是 SSE：`EventSource` 只能 GET、带不了请求体。响应头带 `x-accel-buffering: no` 防止中间层攒流（攒了进度就是假的）。
+  - **老宿主自动降级。** 客户端先打流式路由，遇到 404/405 立即退回去打一次性批量端点；`response.body.getReader()` 不可用、或流里一行有效数据都没读到，同样退回。**升级插件但没重启宿主不会坏功能，只会没有进度。**
+  - **工作区批量删除也做级联展开。** 从 w1 的会话 fork 出来、后来被归到 w2 的子会话，在 w1 的 `sessionIds` 里根本不可见；只按 `sessionIds` 删就会漏。现在先展开子树再取并集，确认条上的数量是展开后的真实条数。
+  - **没有子树时一字不改。** 仍只发 `{sessionId, cwd}` 打单会话端点，v0.4.20 的载荷契约保持原样（断言钉死）。
+  - **新增断言 25 条 + 负向对照 3 条**（右键钉 171 → **196**）：子会话索引的三级树 / 兄弟分支 / 血缘成环不死循环 / 快照读不到返回 `[]` / 字段名改坏后查不出子树（负向对照）；有子树时确认条文案、载荷 = 父 + 子树且不含兄弟；无子树时仍走单会话端点；流式端点 3 个会话 → 恰好 3 次进度且 `done` 为 1,2,3；老宿主降级后删除照常成功且确实打到了批量端点；宿主 `onProgress({done:` 静态钉 + 去掉该调用后必红（负向对照）；工作区跨区子会话级联。
+  - **⚠ 负向对照又踩了一个坑**（教训与 v0.4.22 同源）：`buildBrokenEnv(target, mutate)` 返回的是**沙箱工厂**而不是沙箱本身，直接当 `env` 用会得到 `brokenEnv.ctxDescendantSessionIds is not a function`——必须先经 `buildEnv(...)` 求值。**「构造了一个坏对象」不等于「坏代码被执行过」。**
+  - **回归**：`node --check` 双文件通过；钩子钉 **7/7** + 座位钉 **38/38** + 右键钉 **196/196** + 漂移钉 **3/3** + compat-check **91/91** + live-smoke SKIP，`npm run check` 零 FAIL。
+
+- **v0.4.22**：新增**「删除工作区全部会话」**，并修掉 v0.4.21 遗留的**致命 `peer` 参数 bug**。
   - **新功能**：右键工作区行 → 「删除工作区全部会话…」，二次确认（点名工作区与数量）后一次性把该工作区的会话全部从磁盘删除。
   - **宿主**：新增精确路由 `DELETE_BATCH_ROUTE_PATH = "/api/ui-tools/sessionsDelete"`，与单会话端点**共用同一个 `registerDeleteRoute(path)` 工厂**（单删 = 只含一项的批量），并把删除逻辑抽成 `readDeleteBatchPayload()` + `deleteSessions()`（**串行**执行，逐条收集 `deleted` / `failed`）。条目上限 `DELETE_BATCH_LIMIT = 200`。部分失败回 `{ok:false, error:{code:"partial", details:{deleted, failed}}}`。
   - **客户端**：抽出两条路由共用的 `ctxPostDelete(path, payload)`（原来那份 `.then/.catch` 只服务单删，复制第二份必然分家），新增 `ctxDeleteUrlFor(path)` / `ctxCallSessionsDelete()` / `ctxSessionSummaryIndex()`（后者把列表快照建成 `sessionId → cwd` 的 Map，好让批量载荷带上 cwd）；新增词典六条（菜单项、确认标题与正文、完成提示、部分失败提示、无会话提示），中英各一份。
   - **修掉的致命 bug（v0.4.20/0.4.21 真机上每次删除都被自己拦成 403）**：内核 `createSharedFetchHandler` 在鉴权通过后写的是 `return route.fetch(request)` —— **只传 `request`，`peer` 根本不下传**（`dsh-client-connection/lib/index.js:831`）。而我在 handler 开头写了 `if (peer?.principal?.kind !== "owner") return 403` 当纵深防御，`peer` 恒为 `undefined` ⇒ 判据恒真 ⇒ **每一次删除都回 403「只有本机会话可以删除会话」**。这句文案看着像鉴权在正常工作，实际是插件把自己关死了，极难怀疑到「形参根本不存在」。**修法**：删掉插件侧那层判断（鉴权已由内核传输层 `admit()` + 授权层 `:830` 完成，比插件能做的更严）。
   - **新增断言 4 条 + 负向对照 2 条**（右键钉 164 → **171**）：① 宿主 fetch 回调形参个数必须 === 1；② 源码不许出现 `peer.principal`；③ 批量路径字面量全文件只写死一处；④ 两条删除路由必须共用同一工厂（`registerDeleteRoute(DELETE_…)` 恰好 2 次）；⑤ 工作区菜单 5 项且「删除全部」**紧跟**「归档全部」；⑥ 宿主导出 `DELETE_BATCH_ROUTE_PATH` 与客户端逐字一致。负向对照：把签名改回 `(request, peer)` → ① 必须变红；把 `ctxPostDelete` 里的 URL 拼错一位 → URL 断言必须变红。
   - **⚠ 负向对照本身也踩了一个坑**：第一版把 `ctxDeleteUrlFor` 末尾的 `return path;` 改坏，对照照样「通过」——因为函数开头 `return loc.origin + path;` 在测试环境里**总是先命中**，末尾那条兜底分支根本执行不到。**「改了源码」不等于「改了被执行的那条路径」**，对照变红才是唯一证据。现在改为直接改 `ctxPostDelete` 里 `fetch(ctxDeleteUrlFor(path),` 这个调用点。
-  - **回归**：`node --check` 双文件通过；钩子钉 **7/7** + 座位钉 **38/38** + 右键钉 **171/171** + compat-check **91/91** + 漂移钉 2/3（唯一 FAIL 是「声明 v0.4.21 但实装 v0.4.20」，属未发版前的预期状态）+ live-smoke SKIP。
+  - **回归**：`node --check` 双文件通过；钩子钉 **7/7** + 座位钉 **38/38** + 右键钉 **196/196** + compat-check **91/91** + 漂移钉 2/3（唯一 FAIL 是「声明 v0.4.21 但实装 v0.4.20」，属未发版前的预期状态）+ live-smoke SKIP。
 
 - **v0.4.21**：修复「删除会话」在真机上**必然失败**的问题 —— 通道从 `connection.rpc` 换成 `connection.fetch`。
   - **现象**：装好插件、重启 DSH、点「删除会话」→ 永远提示「插件宿主半边未加载（宿主进程只在启动时装配插件），无法删除会话；请重启 DSH 后重试」。重启多少次都一样。
@@ -300,7 +332,7 @@ node tools/live-smoke.mjs <URL+token>   # 真机冒烟（可选；自动探测�
   - **入口 `inject` 收为 `[]`**：宿主半边的一切依赖（`connection`、探针要的 `webServer`）都放进 **`ctx.inject([...], cb)` 子 fiber**，入口不再声明任何服务 —— R3 的加强版，插件永远不会因为某个服务缺席而整体不激活。
   - **保留诊断能力**：`lib/index.js` 里留了 `diagLog()`（追加写 `~/.dsh/ui-tools-host.log`，全程 try/catch 吞异常）与只读探针 `GET /__dsh_ui_tools_probe`（返回 `delete channel = registered | pending | register-failed: …`）。排查这类「宿主侧静默失败」时，`node tools/diag-session-delete.mjs <port>` 一条命令就能区分「模块没加载 / apply 没跑 / 路由没挂 / 鉴权拦截」。
   - **测试台改造（`tools/check-context-menu.mjs` 156 → 164 条）**：沙箱新增 `location`（Node 无全局 `location`）与 `fetch` 两个形参；新增 `fetchCalls` 记录 + `fetchRoutes` 可编程路由表（未注册路径回 405，用来模拟「宿主没重启」）；`connection` 换成「一碰就抛」的桩（谁改回 `rpc.call` 当场炸）。断言从「`rpc.call("/ui-tools", "sessionDelete")` 逐字」改为「`fetch(ctxDeleteUrl())` + 同源绝对地址 + method/credentials/content-type/body 逐项核对」；宿主静态钉改为「必须有 `connection.fetch.register(`、不许有 `rpc.handle(`、`DELETE_ROUTE_PATH` 与客户端常量逐字一致」。**负向对照 6 条**（含新增：把 `404/405 → no-host` 判定拆掉 → 重启提示必须变红；把删除路径改坏 → URL 断言必须变红）。
-  - **回归**：`npm run check` 全绿 —— 钩子钉 **7/7** + 座位钉 **38/38** + 右键钉 **171/171** + 漂移钉 **3/3** + compat-check **91/91** + live-smoke SKIP（需 `DSH_SMOKE_URL`+token）。
+  - **回归**：`npm run check` 全绿 —— 钩子钉 **7/7** + 座位钉 **38/38** + 右键钉 **196/196** + 漂移钉 **3/3** + compat-check **91/91** + live-smoke SKIP（需 `DSH_SMOKE_URL`+token）。
   - **需要重装插件 + 重启 DSH**：`lib/client.js` 与 `lib/index.js` 都改了，宿主侧只在启动时装配一次 profile。
 
 - **v0.4.20**：新增**「删除会话」**——右键会话行即可把会话从磁盘上真正删掉（不是归档）。

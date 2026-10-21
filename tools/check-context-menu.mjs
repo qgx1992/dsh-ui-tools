@@ -378,7 +378,7 @@ const wanted = [
 	"closeCtxMenu", "ctxPositionMenu", "ctxOpenMenu", "installContextMenu",
 	"ctxFill", "ctxConfirmDialog", "ctxDeleteUrl", "ctxDeleteUrlFor", "ctxPostDelete",
 	"ctxCallSessionDelete", "ctxCallSessionsDelete", "ctxSessionSummaryIndex", "ctxRestoreMenuFocus",
-	"ctxReleaseSession", "ctxCurrentSessionId",
+	"ctxReleaseSession", "ctxCurrentSessionId", "ctxDescendantSessionIds", "ctxCallSessionsDeleteStream",
 ];
 const missing = wanted.filter((name) => extractFunction(name) === null);
 if (missing.length > 0) {
@@ -398,6 +398,7 @@ const literalAnchors = [
 	"const CTX_NS = ",
 	"const SESSION_DELETE_PATH = ",
 	"const SESSION_DELETE_BATCH_PATH = ",
+	"const SESSION_DELETE_STREAM_PATH = ",
 ];
 const literalBlocks = literalAnchors.map((anchor) => {
 	const at = src.indexOf(anchor);
@@ -506,9 +507,53 @@ const batchDeleteOk = (record) => {
 		headers: { "content-type": "application/json" },
 	});
 };
+/**
+ * 流式批量删除端点的默认响应（v0.4.23）：真正的 NDJSON 流。
+ *
+ * 这里**不是**把整串 JSON 一次塞进 Response —— 必须用 ReadableStream 逐块
+ * enqueue，客户端走 getReader() 的那条路径才会被真正执行到。如果偷懒返回
+ * 一次性 body，客户端也可能「碰巧」读完全部内容，断言就看不出
+ * 「有没有边删边推进度」这件最关键的事。
+ *
+ * 每个会话之间刻意用 `await Promise.resolve()` 隔开（微任务让位），
+ * 才能验证进度是**逐条**到达的，而不是攒完一起到。
+ */
+const streamDeleteOk = (record) => {
+	const sessions = record !== void 0 && record !== null && Array.isArray(record.body?.sessions) ? record.body.sessions : [];
+	const encoder = new TextEncoder();
+	const body = new ReadableStream({
+		start(controller) {
+			const write = (object) => controller.enqueue(encoder.encode(`${JSON.stringify(object)}\n`));
+			write({ type: "start", total: sessions.length, rejected: 0 });
+			const deleted = [];
+			let index = 0;
+			const step = () => {
+				if (index >= sessions.length) {
+					write({ type: "done", ok: true, value: { ok: true, deleted, removed: deleted.length } });
+					controller.close();
+					return;
+				}
+				const id = String(sessions[index].sessionId);
+				index += 1;
+				deleted.push(id);
+				write({ type: "progress", done: index, total: sessions.length, sessionId: id, ok: true });
+				// 逐块推：让客户端必须读两次以上才能拿到 done。
+				Promise.resolve().then(step);
+			};
+			step();
+		},
+	});
+	return new Response(body, {
+		status: 200,
+		headers: { "content-type": "application/x-ndjson; charset=utf-8" },
+	});
+};
 const fetchRoutes = new Map([
 	["/api/ui-tools/sessionDelete", singleDeleteOk],
 	["/api/ui-tools/sessionsDelete", batchDeleteOk],
+	// 流式端点恒存在（v0.4.23 宿主）。需要模拟「老宿主」时，
+	// 断言会用 makeStores 之后临时 delete 掉这一条，退回 405。
+	["/api/ui-tools/sessionsDeleteStream", streamDeleteOk],
 ]);
 /**
  * @param {string} url 客户端传进来的地址（本插件一定是同源绝对地址）。
@@ -1703,15 +1748,25 @@ await (async () => {
 		if (hostSource !== null && /rpc\s*\.\s*handle\s*\(/.test(stripComments(hostSource))) bad("宿主半边又用回了 connection.rpc.handle（第三方插件不可用，必然抛 webServer inject 错误）");
 		else ok("宿主半边没有用 connection.rpc.handle（第三方插件调它必然抛错）");
 
-		// v0.4.22：批量端点必须由**同一个 handler 工厂**注册两条路由，而不是复制
-		// 一份删改。两份代码一旦分家，就会出现「删一个提示对、删一批提示错」这种
-		// 最难查的分裂。
+		// 三条路由（单删 / 批量 / 流式批量）必须由**同一个 handler 工厂**注册，
+		// 而且这个工厂内部只能有一处 handleDelete 调用点。复制一份改改的后果是
+		// 「删一个提示对、删一批提示错」这种最难查的分裂。
 		if (hostSource !== null) {
 			const hostCodeForRoutes = stripComments(hostSource);
 			const registerConst = hostCodeForRoutes.search(/const\s+registerDeleteRoute\s*=/);
 			const routeCalls = (hostCodeForRoutes.match(/registerDeleteRoute\s*\(\s*DELETE_/g) || []).length;
-			if (registerConst >= 0 && routeCalls === 2) ok("单会话与批量两条路由共用同一个 handler 工厂（一次删一个 = 只含一项的批量）", String(routeCalls));
-			else bad("两条删除路由没有共用 handler 工厂", `registerAt=${registerConst} calls=${routeCalls}`);
+			const handleCalls = (hostCodeForRoutes.match(/return\s+handleDelete\s*\(\s*request\s*,/g) || []).length;
+			if (registerConst >= 0 && routeCalls === 3 && handleCalls === 1) ok("单会话/批量/流式批量三条路由共用同一个 handler 工厂", `routes=${routeCalls}, handleDelete=${handleCalls}`);
+			else bad("三条删除路由没有共用 handler 工厂", `registerAt=${registerConst} routes=${routeCalls} handleDelete=${handleCalls}`);
+
+			// 流式路由必须真的回 NDJSON（content-type），否则客户端解不出逐条进度。
+			if (/application\/x-ndjson/.test(hostCodeForRoutes) && /new\s+ReadableStream\s*\(/.test(hostCodeForRoutes)) ok("流式路由用 ReadableStream 逐条回 NDJSON");
+			else bad("流式批量路由没有实现 NDJSON 流");
+
+			// 客户端必须真的去解 NDJSON（getReader），而不是把流当一次性 json() 读掉 ——
+			// 那会让进度退化成转圈，这条路由也就白加了。
+			if (/getReader\s*\(/.test(stripComments(src))) ok("客户端用 response.body.getReader() 逐行解 NDJSON（不是一次性 json()）");
+			else bad("客户端没有逐行解 NDJSON，进度会退化成转圈");
 		}
 
 		// ⚠ 安全底线：**删除动作**绝不能走裸路由，否则任意网页一个 POST 就能删数据。
@@ -2158,6 +2213,270 @@ await (async () => {
 		const brokenCount = brokenSig === null ? -1 : brokenSig[1].split(",").filter((part) => part.trim() !== "").length;
 		if (brokenCount === 2) ok("负向对照：把形参改回 (request, peer) 后「只声明 1 个形参」会变红（上面那条不是摆设）");
 		else bad(`负向对照失效：改回 (request, peer) 后形参个数仍是 ${brokenCount} —— 这条断言抓不住初版的 bug`);
+	}
+})();
+
+/* ══════════════════════════════════════════════════════════════
+ * 15. v0.4.23：批量删除进度 + 子会话级联
+ * ══════════════════════════════════════════════════════════════ */
+
+/**
+ * 从 DOM 里读出确认条正文（`.dsh-ctx-confirm` 的文本）。
+ * @returns 确认条文本；没有确认条时返回空串。
+ */
+function confirmText() {
+	const dialog = document.body.querySelector(".dsh-ctx-confirm");
+	return dialog === null ? "" : dialog.textContent;
+}
+
+/**
+ * 点开某个会话行的「删除会话…」，再点确认。
+ * @param env 沙箱环境。
+ * @param tree buildTree 的返回值。
+ * @param stores makeStores 的返回值。
+ * @returns 确认条的文本（点确认之前读到的，用于核对正文）。
+ */
+function clickDeleteAndConfirm(env, tree, stores) {
+	install(env, { sessions: stores.sessions, workspaces: stores.workspaces, uiWorkspace: stores.uiWorkspace, connection: stores.connection });
+	tree.sessionRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
+	const menu = document.body.querySelector(".dsh-ctx-menu");
+	const item = menu.querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("删除会话"));
+	item.dispatchEvent(makeEvent("click"));
+	const text = confirmText();
+	const dialog = document.body.querySelector(".dsh-ctx-confirm");
+	const confirm = dialog === null ? void 0 : dialog.querySelectorAll('[role="menuitem"]').find((node) => node.className.includes("dsh-ctx-item--danger"));
+	if (confirm !== void 0) confirm.dispatchEvent(makeEvent("click"));
+	return text;
+}
+
+section("15. v0.4.23：批量删除进度流 + 子会话级联");
+await (async () => {
+	// ── 15a. 子会话索引：从摘要的 parentId 还原整棵树 ──
+	//
+	// 内核血缘链（逐行核对过 app.asar）：dsh-session:2017 写入 header.parentSession
+	// → api-session-controller listFields :2129 变成条目的 parentSessionId
+	// → 客户端 service.js:512 投影成摘要的 parentId。所以只要列表里还有这些
+	// 会话，客户端就能自己算出子树，不需要额外 RPC。
+	{
+		const env = buildEnv();
+		const stores = makeStores();
+		// 造一棵三级树：s1 → s3 → s4，另有一棵不相干的 s2。
+		stores.sessionsState.items = [
+			{ sessionId: "s1", cwd: "D:\\proj\\alpha" },
+			{ sessionId: "s2", cwd: "D:\\proj\\beta" },
+			{ sessionId: "s3", cwd: "D:\\proj\\alpha", parentId: "s1", origin: "subagent" },
+			{ sessionId: "s4", cwd: "D:\\proj\\alpha", parentId: "s3" },
+			{ sessionId: "s9", cwd: "D:\\proj\\alpha", parentId: "s4" },
+		];
+		const descendants = env.ctxDescendantSessionIds(stores.sessions, "s1");
+		if (descendants.length === 3 && descendants.includes("s3") && descendants.includes("s4") && descendants.includes("s9")) {
+			ok("子孙索引沿 parentId 找到三级子树（s1 → s3 → s4 → s9）", descendants.join(","));
+		} else bad("子孙索引没沿 parentId 找出整棵子树", descendants.join(","));
+		if (!descendants.includes("s2")) ok("子孙索引不会误伤无关会话（s2 不在子树里）");
+		else bad("子孙索引把无关会话也算进了子树", descendants.join(","));
+		if (!descendants.includes("s1")) ok("子孙索引不含父会话自己（调用方自己决定要不要带上）");
+		else bad("子孙索引把父会话自己也返回了", descendants.join(","));
+
+		// 兄弟/重复 parentId 不去重就会删两次 —— 宿主虽然也会去重，但客户端
+		// 发出去的条数与确认条上写的数字必须是同一份。
+		stores.sessionsState.items = [
+			{ sessionId: "s1" },
+			{ sessionId: "s3", parentId: "s1" },
+			{ sessionId: "s4", parentId: "s1" },
+		];
+		const siblings = env.ctxDescendantSessionIds(stores.sessions, "s1");
+		if (siblings.length === 2) ok("同父的多个兄弟分支都会收进来", siblings.join(","));
+		else bad("同父的兄弟姐妹分支漏了或重复了", siblings.join(","));
+
+		// 血缘成环（脏数据）不能让 BFS 死循环。
+		stores.sessionsState.items = [
+			{ sessionId: "s1" },
+			{ sessionId: "s3", parentId: "s1" },
+			{ sessionId: "s3x", parentId: "s3" },
+			{ sessionId: "s1", parentId: "s3x" },
+		];
+		const cyclic = env.ctxDescendantSessionIds(stores.sessions, "s1");
+		if (cyclic.length === 2) ok("血缘成环时也能正常收口（不会死循环、不会把父会话算进子树）", cyclic.join(","));
+		else bad("血缘成环时结果不对（可能死循环或把父会话算进来）", cyclic.join(","));
+
+		// 读不到快照时必须返回空数组（级联是附加功能，不能弄坏删除本身）。
+		const brokenSessions = { list: { getSnapshot: () => { throw new Error("boom"); } } };
+		const safe = env.ctxDescendantSessionIds(brokenSessions, "s1");
+		if (Array.isArray(safe) && safe.length === 0) ok("读不到列表快照时级联返回空数组（退回「只删它自己」，不弄坏删除）");
+		else bad("读不到列表快照时级联抛错或返回非数组", String(safe));
+
+		// 负向对照：把 parentId 判据改成 parentSession（内核**摘要**里根本没有这个字段，
+		// 它是 header 上的名字），整棵树必须查不出来 —— 证明上面那几条不是摆设。
+		// buildBrokenEnv 返回的是**工厂**（与 buildSandbox 同形），必须先交给
+		// buildEnv 求值出沙箱函数集合，才拿得到 ctxDescendantSessionIds。
+		const brokenEnv = buildEnv(buildBrokenEnv("ctxDescendantSessionIds", (text) => text.replace(/item\.parentId/g, "item.parentSession")));
+		const brokenStores = makeStores();
+		brokenStores.sessionsState.items = [
+			{ sessionId: "s1" },
+			{ sessionId: "s3", parentId: "s1" },
+			{ sessionId: "s4", parentId: "s3" },
+		];
+		const brokenTree = brokenEnv.ctxDescendantSessionIds(brokenStores.sessions, "s1");
+		if (brokenTree.length === 0) ok("负向对照：字段名写成 parentSession 后子树查不出来（上面那条不是摆设）");
+		else bad(`负向对照失效：字段名写坏后仍查出 ${brokenTree.length} 个子孙 —— 这条断言抓不住错字段`);
+	}
+
+	// ── 15b. 会话行：有子会话时确认条必须说清楚「会一起删」，且真的走批量端点 ──
+	{
+		const env = buildEnv();
+		const tree = buildTree(env);
+		const stores = makeStores();
+		stores.sessionsState.items = [
+			{ sessionId: "s1", cwd: "D:\\proj\\alpha" },
+			{ sessionId: "s2", cwd: "D:\\proj\\beta" },
+			{ sessionId: "s3", cwd: "D:\\proj\\alpha", parentId: "s1" },
+		];
+		fetchCalls.length = 0;
+		const text = clickDeleteAndConfirm(env, tree, stores);
+		if (text.includes("1 个子会话分支")) ok("有子会话时确认条写明「会一并删除 N 个子会话」", text.replace(/\s+/g, " ").slice(0, 70));
+		else bad("有子会话时确认条没提级联（用户会在不知情下多删数据）", text.replace(/\s+/g, " ").slice(0, 90));
+		await Promise.resolve().then(() => new Promise((resolve) => setTimeout(resolve, 5)));
+		// 必须打到批量端点：单会话端点一次只能删一个，级联就必须逐个往返。
+		const urls = fetchCalls.map((call) => call.url);
+		const hitBatch = urls.some((url) => String(url).includes("/api/ui-tools/sessionsDele"));
+		if (hitBatch) ok("有子会话时改走批量/流式端点（一次把子树删干净）", urls.map((url) => new URL(url).pathname).join(" → "));
+		else bad("有子会话时仍在打单会话端点", urls.join(","));
+		const batchCall = fetchCalls.find((call) => String(call.url).includes("/api/ui-tools/sessionsDeleteStream") || String(call.url).includes("/api/ui-tools/sessionsDelete"));
+		const sentIds = batchCall === void 0 || batchCall.body === void 0 || !Array.isArray(batchCall.body.sessions)
+			? []
+			: batchCall.body.sessions.map((entry) => entry.sessionId);
+		if (sentIds.length === 2 && sentIds.includes("s1") && sentIds.includes("s3")) ok("级联载荷 = 父会话 + 子树（s1,s3），不含无关会话", sentIds.join(","));
+		else bad("级联载荷不对", sentIds.join(",") || "（没发出去）");
+		if (!sentIds.includes("s2")) ok("级联载荷不会把兄弟会话一起删掉");
+		else bad("级联载荷误伤了无关会话", sentIds.join(","));
+	}
+
+	// ── 15c. 没有子会话时保持 v0.4.20 的单会话契约（载荷最小） ──
+	{
+		const env = buildEnv();
+		const tree = buildTree(env);
+		const stores = makeStores();
+		fetchCalls.length = 0;
+		const text = clickDeleteAndConfirm(env, tree, stores);
+		if (!text.includes("子会话")) ok("没有子会话时确认条不提级联（不吓唬用户）");
+		else bad("没有子会话时确认条也提了级联", text.replace(/\s+/g, " ").slice(0, 80));
+		await Promise.resolve().then(() => new Promise((resolve) => setTimeout(resolve, 5)));
+		const paths = fetchCalls.map((call) => { try { return new URL(call.url).pathname; } catch { return String(call.url); } });
+		if (paths.length > 0 && paths.every((path) => path === "/api/ui-tools/sessionDelete")) ok("没有子会话时仍走单会话端点（不为了新功能改动老契约）", paths.join(","));
+		else bad("没有子会话时没有走单会话端点", paths.join(",") || "（没发出去）");
+	}
+
+	// ── 15d. 进度：宿主逐条推 NDJSON，界面必须逐条「已删除 k/N」 ──
+	//
+	// 这条是「进度条真的在动」的核心断言：fetch 桩返回的是**真流**，
+	// 客户端每读到一行 progress 就要刷一次提示。为了抓住「只刷了最后一次」
+	// 这种假实现，这里记录**每一次** ctxFlash 调用过的文案。
+	{
+		const env = buildEnv();
+		const tree = buildTree(env);
+		const stores = makeStores();
+		stores.sessionsState.items = [
+			{ sessionId: "s1", cwd: "D:\\proj\\alpha" },
+			{ sessionId: "s2", cwd: "D:\\proj\\beta" },
+			{ sessionId: "s3", parentId: "s1" },
+			{ sessionId: "s4", parentId: "s1" },
+		];
+		// 拦截 ctxFlash：它在测试台里由 SANDBOX_PRELUDE 之外的 module 作用域提供，
+		// 这里通过沙箱里那个同名函数包装一层记录 —— 见下方 install 之后的重绑说明。
+		fetchCalls.length = 0;
+		const progressSeen = [];
+		install(env, { sessions: stores.sessions, workspaces: stores.workspaces, uiWorkspace: stores.uiWorkspace, connection: stores.connection });
+		// 直接调流式客户端函数，绕过菜单（进度逻辑本身与菜单无关），
+		// 并且用真实 fetch 桩，这样 NDJSON 解析路径会被真正执行。
+		let lastProgress = null;
+		await env.ctxCallSessionsDeleteStream(stores.connection, [{ sessionId: "a1", cwd: "" }, { sessionId: "a2", cwd: "" }, { sessionId: "a3", cwd: "" }], (record) => {
+			progressSeen.push(record);
+			lastProgress = record;
+		});
+		if (progressSeen.length === 3) ok("流式端点每删完一个就回调一次进度（3 个会话 → 3 次进度）", String(progressSeen.length));
+		else bad("进度回调次数不对（按整批算一次就等于没有进度）", String(progressSeen.length));
+		if (progressSeen.length > 0 && progressSeen[progressSeen.length - 1].done === 3 && progressSeen[progressSeen.length - 1].total === 3) {
+			ok("最后一次进度的 done/total 是 3/3（数字单调递增到总数）", `${progressSeen[progressSeen.length - 1].done}/${progressSeen[progressSeen.length - 1].total}`);
+		} else bad("最后一次进度的 done/total 不对", JSON.stringify(lastProgress));
+		const increasing = progressSeen.every((record, index) => record.done === index + 1);
+		if (increasing) ok("进度是逐条递增的（1,2,3），不是攒完一起报");
+		else bad("进度不是逐条递增", progressSeen.map((record) => record.done).join(","));
+	}
+
+	// ── 15e. 老宿主没有流式路由 → 自动退回一次性端点，功能不受影响 ──
+	{
+		const env = buildEnv();
+		const stores = makeStores();
+		install(env, { sessions: stores.sessions, workspaces: stores.workspaces, uiWorkspace: stores.uiWorkspace, connection: stores.connection });
+		const saved = fetchRoutes.get("/api/ui-tools/sessionsDeleteStream");
+		fetchRoutes.delete("/api/ui-tools/sessionsDeleteStream");
+		fetchCalls.length = 0;
+		let outcome = null;
+		let error = null;
+		try {
+			outcome = await env.ctxCallSessionsDeleteStream(stores.connection, [{ sessionId: "a1", cwd: "" }, { sessionId: "a2", cwd: "" }], () => {});
+		} catch (caught) {
+			error = caught;
+		} finally {
+			fetchRoutes.set("/api/ui-tools/sessionsDeleteStream", saved);
+		}
+		if (error === null && outcome !== null && outcome.ok === true) ok("老宿主没有流式路由时自动退回批量端点，删除照常成功", JSON.stringify(outcome.value));
+		else bad("老宿主没有流式路由时删除失败（升级后不重启宿主会直接坏掉）", error === null ? JSON.stringify(outcome) : String(error.message));
+		const paths = fetchCalls.map((call) => { try { return new URL(call.url).pathname; } catch { return String(call.url); } });
+		if (paths.includes("/api/ui-tools/sessionsDelete")) ok("退回时确实打了批量端点", paths.join(" → "));
+		else bad("退回时没有打批量端点", paths.join(",") || "（没发出去）");
+	}
+
+	// ── 15f. 宿主侧：流式路由必须逐条推、且删完推 done ──
+	//
+	// 这一段直接求值宿主里的 deleteSessions + deleteEnvelope 太麻烦（它们依赖
+	// 真实宿主服务），所以改用**静态钉 + 文本变异**：
+	// 缺了 onProgress 调用，客户端那条 15d 就成了空中楼阁。
+	{
+		const hostPath = new URL("../lib/index.js", import.meta.url);
+		let hostText = "";
+		try { hostText = fs.readFileSync(hostPath, "utf8"); } catch { hostText = ""; }
+		const hostCode = stripComments(hostText);
+		if (/onProgress\s*\(\s*\{\s*done:/.test(hostCode)) ok("宿主 deleteSessions 每删完一个就回调 onProgress（进度是真数出来的，不是估的）");
+		else bad("宿主 deleteSessions 没有逐条回调进度 —— 客户端进度只能是假的");
+		if (/type:\s*"progress"/.test(hostCode) && /type:\s*"done"/.test(hostCode)) ok("宿主 NDJSON 流同时推 progress 与 done 两种行");
+		else bad("宿主 NDJSON 流的行类型不全");
+		// 负向对照：把回调那一行注释掉，第一条必须抓不到 onProgress 调用了。
+		const brokenCode = hostCode.replace(/onProgress\s*\(\s*\{\s*done:/, "void (");
+		if (!/onProgress\s*\(\s*\{\s*done:/.test(brokenCode)) ok("负向对照：去掉 onProgress 调用后「逐条回调」会变红（上面那条不是摆设）");
+		else bad("负向对照失效：去掉 onProgress 调用后断言仍会放过");
+	}
+
+	// ── 15g. 工作区行：级联到「不在本工作区里的子会话」 ──
+	{
+		const env = buildEnv();
+		const tree = buildTree(env);
+		const stores = makeStores();
+		// s5 从 s2 分叉出来，但被归到了别的工作区（列表里看不到它属于 w1）。
+		stores.sessionsState.items = [
+			{ sessionId: "s1", cwd: "D:\\proj\\alpha" },
+			{ sessionId: "s2", cwd: "D:\\proj\\beta" },
+			{ sessionId: "s5", parentId: "s2" },
+		];
+		install(env, { sessions: stores.sessions, workspaces: stores.workspaces, uiWorkspace: stores.uiWorkspace, connection: stores.connection });
+		tree.rootRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
+		const menu = document.body.querySelector(".dsh-ctx-menu");
+		const item = menu.querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("删除工作区全部会话"));
+		item.dispatchEvent(makeEvent("click"));
+		const text = confirmText();
+		if (text.includes("1 个子会话分支")) ok("工作区批量删除也会把跨工作区的子会话算一级并写进确认条", text.replace(/\s+/g, " ").slice(0, 70));
+		else bad("工作区批量删除没算级联子会话", text.replace(/\s+/g, " ").slice(0, 90));
+		fetchCalls.length = 0;
+		const dialog = document.body.querySelector(".dsh-ctx-confirm");
+		const confirm = dialog.querySelectorAll('[role="menuitem"]').find((node) => node.className.includes("dsh-ctx-item--danger"));
+		confirm.dispatchEvent(makeEvent("click"));
+		await Promise.resolve().then(() => new Promise((resolve) => setTimeout(resolve, 10)));
+		const batchCall = fetchCalls.find((call) => String(call.url).includes("/sessionsDele"));
+		const sentIds = batchCall === void 0 || batchCall.body === void 0 || !Array.isArray(batchCall.body.sessions)
+			? []
+			: batchCall.body.sessions.map((entry) => entry.sessionId);
+		if (sentIds.length === 3 && sentIds.includes("s1") && sentIds.includes("s2") && sentIds.includes("s5")) ok("工作区批量载荷 = 工作区全部会话 + 跨区子会话（3 个）", sentIds.join(","));
+		else bad("工作区批量载荷没带上跨区子会话", sentIds.join(",") || "（没发出去）");
 	}
 })();
 
