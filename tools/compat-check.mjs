@@ -216,7 +216,7 @@ await tools.mkdir({ dirs: ["src/nested", "src/empty"] });` }) }
 /**
  * 从 bundle 源码截取功能五取数段，直接测 tsp* 纯函数（不经 VDOM/hooks）。
  * 与 loadClientBundle 同一份 BUNDLE 源码，保证测的就是被测 bundle。
- * @returns {{ tspFormatTps: Function, tspEstimateTokens: Function, tspChunkEffort: Function, tspTurnSpeed: Function }}
+ * @returns {{ tspFormatTps: Function, tspEstimateTokens: Function, tspBlocksEffort: Function, tspFoldTurn: Function, tspLastTurnSpeed: Function, tspTurnSpeed: Function }}
  */
 function loadTspSpeed() {
 	const src = fs.readFileSync(BUNDLE, "utf8");
@@ -225,22 +225,22 @@ function loadTspSpeed() {
 	if (si < 0 || ei < 0) throw new Error("TPS 取数段定位失败");
 	const depSrc = src.slice(si, ei);
 	// eslint-disable-next-line no-new-func
-	return new Function(depSrc + "\nreturn { tspFormatTps, tspEstimateTokens, tspChunkEffort, tspTurnSpeed };")();
+	return new Function(depSrc + "\nreturn { tspFormatTps, tspEstimateTokens, tspBlocksEffort, tspFoldTurn, tspLastTurnSpeed, tspTurnSpeed };")();
 }
 
 /**
- * 从 bundle 源码截取功能五的两个组件，用 reactStub 直接调用（不经真 DOM）。
+ * 从 bundle 源码截取功能五的 dock 组件，用 reactStub 直接调用（不经真 DOM）。
  * 组件的 DOM 结构与偏好开关门控都能在这里断言 —— 不必依赖真机截图。
- * @param hooks - 可选 hooks 覆写（例如把 useState 钉成固定时刻，测估算速度）。
- * @returns {{ TokenSpeedPill: Function, TokenSpeedLive: Function }}
+ * @param hooks - 可选 hooks 覆写（例如把 useRef 钉成可控累积器，测估算速度）。
+ * @returns {{ TokenSpeedDockPill: Function }}
  */
 function loadTspComponents(hooks = {}) {
 	const src = fs.readFileSync(BUNDLE, "utf8");
-	// 纯函数段与组件段都要（组件调用 tspFormatTps / tspTurnSpeed）。
+	// 纯函数段与组件段都要（组件调用 tspFormatTps / tspLastTurnSpeed / tspBlocksEffort）。
 	const pureStart = src.indexOf("/* ── 功能五取数段");
 	const pureEnd = src.indexOf("/* ── 功能五取数段结束 ── */");
-	const compStart = src.indexOf("function TokenSpeedPill(props)");
-	const compEnd = src.indexOf("function tspLiveDefinition()");
+	const compStart = src.indexOf("function TokenSpeedDockPill(props)");
+	const compEnd = src.indexOf("function tspChatSource(ctx, sessionId)");
 	if (pureStart < 0 || pureEnd < 0 || compStart < 0 || compEnd < 0) throw new Error("TPS 组件段定位失败");
 	const depSrc = src.slice(pureStart, pureEnd) + "\n" + src.slice(compStart, compEnd);
 	// 组件只依赖 react、usePrefs（uSES 封装）与上面的纯函数；usePrefs 在 stub 下
@@ -248,9 +248,9 @@ function loadTspComponents(hooks = {}) {
 	const usePrefs = (prefs) => reactStub.useSyncExternalStore(prefs.subscribe, prefs.getSnapshot);
 	// eslint-disable-next-line no-new-func
 	const factory = new Function("react", "usePrefs", "useState", "useEffect", "useMemo", depSrc
-		+ "\nreturn { TokenSpeedPill, TokenSpeedLive };");
+		+ "\nreturn { TokenSpeedDockPill };");
 	return factory(
-		{ ...reactStub, useMemo: (fn) => fn() },
+		{ ...reactStub, useMemo: (fn) => fn(), useRef: hooks.useRef ?? reactStub.useRef },
 		usePrefs,
 		hooks.useState ?? reactStub.useState,
 		hooks.useEffect ?? reactStub.useEffect,
@@ -736,18 +736,32 @@ section("B. 新内核（提供 uiConversation）：五个功能全部生效");
 	check("dispose 后 capability.alphaApi 回落 false", setFace?.capability?.getSnapshot().alphaApi === false);
 }
 
-/* ══════════════════════ 场景 B2：功能五 输出速度计（v0.4.6） ══════════════════════ */
+/* ══════════════════════ 场景 B2：功能五 输出速度计（v0.4.25 迁到 composer.dock） ══════════════════════ */
 
-section("B2. 功能五：输出速度计（精确 pill + 生成中估算 Definition）");
+section("B2. 功能五：输出速度计（dock 统计行 pill：末回合精确 + 生成中估算）");
 {
 	const env = await mount({ alpha: true });
 
-	// ① 精确 pill：注册在 assistant-actions 槽，且 order 为负（排在官方「用时」pill 之前，
-	//    即动作条内紧邻其左侧）。数值口径必须与内核 deriveTurnMetrics 一致。
-	const pill = env.seats.get("conversation.chat.assistant-actions")?.find((row) => row.def.id === "ui-tools-token-speed");
-	check("功能五精确 pill 注册进 conversation.chat.assistant-actions", pill !== void 0,
+	// ① 注册位：conversation.composer.dock（输入框下方「N 轮 M 步」那一行），
+	//    新 id + order 2（排在官方 activity 0 / usage 1 之后，纯增量新增）。
+	const dockRows = env.seats.get("conversation.composer.dock") ?? [];
+	const pill = dockRows.find((row) => row.def.id === "ui-tools-token-speed");
+	check("功能五速度计注册进 conversation.composer.dock（输入框下方统计行）", pill !== void 0,
 		env.ledger.registered.join(", "));
-	check("pill order 为负（渲染在官方「用时」左侧）", pill?.def.order === -10, String(pill?.def.order));
+	check("dock 控件 order = 2（排在官方 activity/usage 之后）", pill?.def.order === 2, String(pill?.def.order));
+	check("dock 控件 name 与注册名一致（内核 buildNode 校验 name）",
+		pill?.def.name === "conversation.composer.dock", String(pill?.def.name));
+
+	// 反向钉：旧的 assistant-actions pill 与 chat.node 渲染器 + Definition 通道必须全部消失。
+	check("不再注册 conversation.chat.assistant-actions 的速度 pill",
+		!env.ledger.registered.some((row) => row.startsWith("conversation.chat.assistant-actions/")),
+		env.ledger.registered.join(", "));
+	check("不再注册 conversation.chat.node 渲染器（自建 chat 节点方案已删）",
+		!env.ledger.registered.some((row) => row.startsWith("conversation.chat.node/")),
+		env.ledger.registered.join(", "));
+	check("不再走 Definition 通道（ledger.definitions 为空）",
+		env.ledger.definitions.length === 0,
+		env.ledger.definitions.map((def) => def.kind).join(", ") || "（无）");
 
 	const speed = loadTspSpeed();
 	// 口径对齐内核：ΣoutputTokens ÷ Σ(completedTime − firstTokenTime)，只计 timing 齐备的 step。
@@ -760,9 +774,15 @@ section("B2. 功能五：输出速度计（精确 pill + 生成中估算 Definit
 			// 别的回合 → 必须被排除
 			{ kind: "assistant", turn: 2, messageId: "m4", timing: { firstTokenTime: 0, completedTime: 1000 }, usage: { outputTokens: 777 } }
 		];
-		const tps = speed.tspTurnSpeed(nodes, "m2");
-		check("精确口径 = ΣoutputTokens ÷ ΣdecodeMs（跳过 timing 不全/异回合）", tps === 300 / 4,
-			`${String(tps)} 期望 75`);
+		check("tspTurnSpeed（按 messageId）口径 = ΣoutputTokens ÷ ΣdecodeMs（跳过 timing 不全/异回合）",
+			speed.tspTurnSpeed(nodes, "m2") === 300 / 4, `${String(speed.tspTurnSpeed(nodes, "m2"))} 期望 75`);
+		check("tspFoldTurn（按回合号）与 tspTurnSpeed 同口径", speed.tspFoldTurn(nodes, 1) === 300 / 4,
+			String(speed.tspFoldTurn(nodes, 1)));
+		// 最近一回合：取最大 turn（此处 turn 2 只有 m4 → 777/1 = 777）。
+		check("tspLastTurnSpeed 取最大回合再折叠", speed.tspLastTurnSpeed(nodes) === 777,
+			String(speed.tspLastTurnSpeed(nodes)));
+		check("tspLastTurnSpeed 空/非法入参返回 null",
+			speed.tspLastTurnSpeed([]) === null && speed.tspLastTurnSpeed(void 0) === null);
 	}
 
 	check("无该 messageId 时返回 null（不猜、不显示）", speed.tspTurnSpeed([{ kind: "assistant", turn: 1, messageId: "x", timing: {}, usage: {} }], "nope") === null);
@@ -779,241 +799,96 @@ section("B2. 功能五：输出速度计（精确 pill + 生成中估算 Definit
 		speed.tspEstimateTokens("中文四字") === 4 && speed.tspEstimateTokens("abcd") === 1,
 		`${speed.tspEstimateTokens("中文四字")} / ${speed.tspEstimateTokens("abcd")}`);
 
-	// ② 生成中估算条：走 Definition 通道，必须真的注册、且状态机按契约演进。
-	const live = env.ledger.definitions.find((def) => def.kind === "token-speed-live");
-	check("功能五注册 token-speed-live Definition（生成中估算）", live !== void 0,
-		env.ledger.definitions.map((def) => def.kind).join(", ") || "（无）");
-	check("Definition 声明 target=chat 且带 buildViewNode（内核 assertDefinitionTarget 要求两者成对）",
-		live?.target === "chat" && typeof live?.buildViewNode === "function");
+	// blocks 折算：text/reasoning 计 text，tool-call 计 name+argsRaw，其余（image/other）为 0。
+	check("tspBlocksEffort：正文/推理/工具调用参数计努力量，其它 block 为 0",
+		speed.tspBlocksEffort([
+			{ kind: "text", text: "中文四字" },          // 4
+			{ kind: "reasoning", text: "abcd" },        // 1
+			{ kind: "tool-call", name: "edit", argsRaw: "abcd" }, // name(4字=1) + args(4字=1) = 2
+			{ kind: "image" }                            // 0
+		]) === 7,
+		String(speed.tspBlocksEffort([{ kind: "text", text: "中文四字" }, { kind: "reasoning", text: "abcd" }, { kind: "tool-call", name: "edit", argsRaw: "abcd" }, { kind: "image" }])));
+	check("tspBlocksEffort：非数组/空数组返回 0", speed.tspBlocksEffort(void 0) === 0 && speed.tspBlocksEffort([]) === 0);
 
-	if (live !== void 0) {
-		const mk = (type, data, seq = 1, time = 1000) => ({ event: { type, data, seq, time, surfaceOp: "append" }, role: "update", location: { kind: "unresolved" } });
-		// 事件匹配面：只认本回合的四个生命周期事件，其余一律 null（不干扰别家 Definition）。
-		check("match 只认 turn/start、step/start、live-chunk、turn/end",
-			live.match({ type: "turn/start", data: { turn: 7 } })?.role === "start"
-			&& live.match({ type: "assistant/live-chunk", data: { turn: 7, chunk: { type: "text-delta", text: "x" } } })?.id === "t7"
-			&& live.match({ type: "tool/call", data: { turn: 7 } }) === null
-			&& live.match({ type: "assistant/message", data: { turn: 7 } }) === null);
-
-		// 状态机：start → 首个输出增量锚定 → 继续累加 → turn/end 后不再产出节点。
-		let state = live.start({}, { event: { type: "turn/start", data: { turn: 7 }, seq: 1, time: 1000 }, role: "start" });
-		// ⚠ v0.4.8：能不能返回 null 取决于「能否证明从未物化」，两种情形分开钉。
-		// ① 内核给了可读的 context.current 且该 target 为空 → 确认未物化 → null 安全（避免空占位）。
-		check("起始状态无输出且已确认未物化（current 可读且为空）→ 返回 null 避免空占位",
-			live.buildViewNode({ key: "k", kind: "token-speed-live", id: "t7", state, start: void 0, current: new Map() }) === null);
-		// ② 读不到 context.current → **无法证明**未物化 → 保守返回 hidden（issue #1 指出的不可区分性）。
-		//    宁可多挂一帧隐藏节点，也不能误判 previous=null 而触发撤回异常。
-		{
-			const unknownShape = live.buildViewNode({ key: "k", kind: "token-speed-live", id: "t7", state, start: void 0 });
-			check("读不到 context.current 时保守返回同 key + hidden（不敢断言未物化）",
-				unknownShape !== null && unknownShape.visibility === "hidden" && unknownShape.key === "k",
-				unknownShape === null ? "返回了 null → 形态变化时会静默复现撤回异常" : String(unknownShape.visibility));
-		}
-
-		state = live.update({ state }, mk("assistant/live-chunk", { turn: 7, chunk: { type: "text-delta", text: "你好" } }, 2, 1200));
-		state = live.update({ state }, mk("assistant/live-chunk", { turn: 7, chunk: { type: "reasoning-delta", text: "thinking" } }, 3, 1400));
-		check("流式估算同时累计正文与推理增量（与内核 isTokenDelta 同集合）",
-			state.estTokens > 2 && state.firstTokenAt === 1200, JSON.stringify({ est: state.estTokens, first: state.firstTokenAt }));
-		// 分母只含「真的在解码」的时间：1200→1400 的 200ms 计入；
-		// 1400→9000 的 7.6s 是工具执行等停顿，必须被截断为 GAP_CAP（1000ms）。
-		state = live.update({ state }, mk("assistant/live-chunk", { turn: 7, chunk: { type: "text-delta", text: "后续输出" } }, 4, 9000));
-		check("停顿时长不计入分母（读数不被无输出间隔稀释）",
-			state.activeMs === 200 + 1000, `activeMs=${state.activeMs} 期望 1200`);
-
-		const node = live.buildViewNode({ key: "k", kind: "token-speed-live", id: "t7", state, start: { location: { kind: "unresolved" } } });
-		check("渲染节点 key 稳定且等于 context.key（内核会校验，否则抛 unstable key）",
-			node?.key === "k" && node?.target === "chat" && node?.kind === "token-speed-live");
-		check("渲染节点排在本回合末尾（anchorSeq 大于任何真实事件 seq）",
-			node?.anchorSeq === 2 ** 31, String(node?.anchorSeq));
-
-		// ⚠ v0.4.7 回归钉：节点一旦物化，就绝不能再返回 null。
-		// 内核 buildTargetUpserts() 对「上一帧已物化、本帧返回 null」直接抛
-		// `conversation Definition "x" withdrew materialized target "chat"`，
-		// 该异常会让整条 chat 视图快照链停更 —— 真机症状为回合结束后界面不再刷新、
-		// 后续提问不显示（0.1.6-alpha.2 / 0.1.7-alpha.1 均已如实复现）。
-		// 正确写法是「同 key + visibility:"hidden"」，由内核按可见性过滤。
-		const afterEnd = live.update({ state }, mk("turn/end", { turn: 7 }, 4, 5000));
-		const endNode = live.buildViewNode({ key: "k", kind: "token-speed-live", id: "t7", state: afterEnd, start: void 0 });
-		check("turn/end 后让位给精确 pill（不再可见）",
-			endNode !== null && endNode.visibility === "hidden");
-		check("物化后绝不撤回节点（同 key + hidden；返回 null 会被内核判为 withdrew materialized target）",
-			endNode !== null && endNode.key === "k" && endNode.kind === "token-speed-live" && endNode.target === "chat");
-		const freshStart = live.start({}, { event: { type: "turn/start", data: { turn: 7 }, seq: 1, time: 1000 }, role: "start" });
-		check("首帧未物化且已确认（current 可读且为空）→ 返回 null",
-			live.buildViewNode({ key: "k", kind: "token-speed-live", id: "t7", state: freshStart, start: void 0, current: new Map() }) === null);
-
-		// ⚠⚠ v0.4.7 回归钉（只看 state 修不干净的那个）：真机流式增量是 **transient** 记录，
-		// 回合收尾内核走 settleAssistant()：retire transient 后 **replayContext** 把状态
-		// 倒推回 firstTokenAt=null / estTokens=0（注意：并不是 ended=true）。
-		// 因此「firstTokenAt === null → 返回 null」仍会触发 withdrew 异常。
-		// 唯一可靠判据是内核给的 context.current（上一帧已物化节点）。
-		{
-			const materialized = { key: "k", kind: "token-speed-live", id: "t7", target: "chat", visibility: "visible", data: {} };
-			const current = new Map([["chat", materialized]]);
-			// 状态被 replay 倒推回「尚无输出」——但本 target 已物化过
-			const replayedBack = live.start({}, { event: { type: "turn/start", data: { turn: 7 }, seq: 1, time: 1000 }, role: "start" });
-			const held = live.buildViewNode({ key: "k", kind: "token-speed-live", id: "t7", state: replayedBack, start: void 0, current });
-			check("transient 被 retire 后状态倒推回无输出，但已物化 → 必须返回 hidden 而非 null",
-				held !== null && held.visibility === "hidden", held === null ? "返回了 null → 真机会抛 withdrew" : String(held.visibility));
-			check("该兜底节点仍保持同 key/kind/target（内核会校验 key 稳定）",
-				held?.key === "k" && held?.kind === "token-speed-live" && held?.target === "chat");
-			// state 本身缺失（分页窗口先到 update）但已物化过 → 同样不能返回 null
-			const heldNoState = live.buildViewNode({ key: "k", kind: "token-speed-live", id: "t7", state: void 0, start: void 0, current });
-			check("state 缺失但已物化过 → 仍返回 hidden（不撤回）",
-				heldNoState !== null && heldNoState.visibility === "hidden");
-			// 未物化过 + state 缺失 → 返回 null 安全
-			check("未物化过 + state 缺失 → 返回 null（安全路径）",
-				live.buildViewNode({ key: "k", kind: "token-speed-live", id: "t7", state: void 0, start: void 0, current: new Map() }) === null);
-		}
-
-		// 内核要求 update 永不返回 undefined（requireState 会抛错）。
-		check("缺 start 时 update 返回兜底状态而非 undefined（分页窗口回归钉）",
-			live.update({ state: void 0 }, mk("assistant/live-chunk", { turn: 9, chunk: { type: "text-delta", text: "a" } }, 5, 600)) !== void 0);
-		check("usage / finish chunk 不触发发布（与内核 assistant-step 同规则）",
-			live.publication(mk("assistant/live-chunk", { turn: 7, chunk: { type: "usage", usage: {} } })) === "none"
-			&& live.publication(mk("assistant/live-chunk", { turn: 7, chunk: { type: "finish" } })) === "none"
-			&& live.publication(mk("assistant/live-chunk", { turn: 7, chunk: { type: "text-delta", text: "a" } })) === "animation-frame");
-	}
-
-	// ③ 偏好开关：默认开、可持久化、坏数据回退。
+	// ② 偏好开关：默认开、可持久化、坏数据回退。
 	check("偏好新增 tokenSpeedEnabled 且默认开",
 		env.seats.get("settings.section")?.[0]?.def.inject().prefs.getSnapshot().tokenSpeedEnabled === true);
 
-	// ④ 组件层：直接调起两个组件，钉住 DOM 结构与开关门控（不必依赖真机截图）。
+	// ③ 组件层：直接调起 dock pill，钉住 DOM 结构与开关门控（不必依赖真机截图）。
 	{
-		const { TokenSpeedPill, TokenSpeedLive } = loadTspComponents();
-		const nodes = [
-			{ kind: "assistant", turn: 1, messageId: "m1", timing: { firstTokenTime: 0, completedTime: 4000 }, usage: { outputTokens: 120 } }
-		];
-		const chatSource = { subscribe: () => () => {}, getSnapshot: () => ({ legacy: { nodes } }) };
 		const t = (key, vars) => {
 			const dict = { "tps.exact": "{tps} tok/s", "tps.estimated": "≈ {tps} tok/s", "tps.liveNote": "生成中估算", "tps.title": "T", "tps.liveTitle": "L", "a11y.exact": "a{tps}", "a11y.estimated": "e{tps}" };
 			let text = dict[key] ?? key;
 			for (const name of Object.keys(vars ?? {})) text = text.replace(`{${name}}`, String(vars[name]));
 			return text;
 		};
-
 		const on = makePrefs({ tokenSpeedEnabled: true });
-		const pillEl = TokenSpeedPill({ messageId: "m1", useTspChat: (sel) => sel(chatSource.getSnapshot()), t, prefs: on });
-		check("精确 pill：30 tok/s 按内核口径算出并渲染文案", flatten(pillEl) === "⚡30 tok/s", flatten(pillEl));
-		check("精确 pill：带 data-tsp-pill 与 title/aria（真机选择器与可访问性）",
-			pillEl?.props?.["data-tsp-pill"] === "" && typeof pillEl.props.title === "string" && pillEl.props["aria-label"] === "a30");
-
 		const off = makePrefs({ tokenSpeedEnabled: false });
-		check("精确 pill：开关关闭时渲染 null（不占位）",
-			TokenSpeedPill({ messageId: "m1", useTspChat: (sel) => sel(chatSource.getSnapshot()), t, prefs: off }) === null);
-		check("精确 pill：无 usage 的回合渲染 null（不显示假值）",
-			TokenSpeedPill({ messageId: "missing", useTspChat: (sel) => sel(chatSource.getSnapshot()), t, prefs: on }) === null);
+		const nodes = [
+			{ kind: "assistant", turn: 1, messageId: "m1", timing: { firstTokenTime: 0, completedTime: 4000 }, usage: { outputTokens: 120 } }
+		];
+		const snapshot = { legacy: { nodes, partial: void 0 } };
+		const useTspChat = (sel) => sel(snapshot);
 
-		const liveNode = { data: { turn: 1, startedAt: 0, firstTokenAt: 0, activeMs: 4000, estTokens: 100 } };
-		// 100 token / 4000ms 有效解码 = 25 → 显示「≈ 25 tok/s」。
-		const liveEl = TokenSpeedLive({ node: liveNode, t, prefs: on });
-		check("生成中估算条：标注估算口径（带 ≈ 与「生成中估算」）并渲染",
-			flatten(liveEl).includes("≈ 25 tok/s") && flatten(liveEl).includes("生成中估算"), flatten(liveEl));
-		check("生成中估算条：data-tsp-live + role=status（无障碍播报）",
-			liveEl?.props?.["data-tsp-live"] === "" && liveEl.props.role === "status");
-		check("生成中估算条：开关关闭时渲染 null",
-			TokenSpeedLive({ node: liveNode, t, prefs: off }) === null);
-		check("生成中估算条：无输出数据时渲染 null（不显示 0 tok/s）",
-			TokenSpeedLive({ node: { data: { activeMs: 4000, estTokens: 0 } }, t, prefs: on }) === null);
-		check("生成中估算条：有效解码时间过短（<250ms）时不显示（避免爆表读数）",
-			TokenSpeedLive({ node: { data: { activeMs: 100, estTokens: 100 } }, t, prefs: on }) === null);
+		// 精确值路径（无 partial）：120/4 = 30 → 「⚡30 tok/s」。
+		const { TokenSpeedDockPill } = loadTspComponents();
+		const pillEl = TokenSpeedDockPill({ useTspChat, t, prefs: on });
+		check("dock pill：末回合精确值 30 tok/s 渲染文案", flatten(pillEl) === "⚡30 tok/s", flatten(pillEl));
+		check("dock pill：带 data-tsp-pill 与 title/aria（真机选择器与可访问性）",
+			pillEl?.props?.["data-tsp-pill"] === "" && typeof pillEl.props.title === "string" && pillEl.props["aria-label"] === "a30");
+		check("dock pill：开关关闭时渲染 null（不占位）",
+			TokenSpeedDockPill({ useTspChat, t, prefs: off }) === null);
+		check("dock pill：无任何可算数据时渲染 null（不显示假值）",
+			TokenSpeedDockPill({ useTspChat: (sel) => sel({ legacy: { nodes: [] } }), t, prefs: on }) === null);
+
+		// 生成中估算路径：用可控 useRef + 受控时钟，模拟两帧流式增量。
+		let clock = 0;
+		const realNow = performance.now;
+		performance.now = () => clock;
+		const sharedRef = { current: null };
+		const { TokenSpeedDockPill: DynPill } = loadTspComponents({ useRef: () => sharedRef });
+		const partialState = { legacy: { nodes: [], partial: { turn: 1, step: 0, blocks: [{ kind: "text", text: "abcdabcd" }] } } };
+		const useDyn = (sel) => sel(partialState);
+		// 帧 1：建累积器（estTokens=0，尚不足以下结论）→ null。
+		const frame1 = DynPill({ useTspChat: useDyn, t, prefs: on });
+		// 帧 2：blocks 引用变化（新增量），时钟前进 1500ms（按 GAP_CAP 截断为 1000ms）。
+		clock = 1500;
+		partialState.legacy.partial = { turn: 1, step: 0, blocks: [{ kind: "text", text: "abcdabcdabcdabcdabcdabcdabcdabcdabcdabcd" }] };
+		const frame2 = DynPill({ useTspChat: useDyn, t, prefs: on });
+		performance.now = realNow;
+		check("dock pill：生成中按 blocks 折算并标注估算口径（≈ + 生成中估算）",
+			flatten(frame2).includes("≈ ") && flatten(frame2).includes("生成中估算"), `${flatten(frame1)} → ${flatten(frame2)}`);
+		check("dock pill：生成中 pill 带 data-tsp-pill 且 role=status（无障碍播报）",
+			frame2?.props?.["data-tsp-pill"] === "" && frame2?.props?.role === "status");
 	}
 
 	await env.entryFiber.dispose();
 }
 
 
-/* ══════════════════════ 场景 B3：功能五 × 真内核装配器（v0.4.7） ══════════════════════
- * 假内核测不到 Definition 的「撤回」硬校验，也测不到 transient→settleAssistant 的
- * 状态倒推路径 —— 而 v0.4.7 正是漏在这里（修完仍复现「后续提问不显示」）。
- * 本节把插件真实的 token-speed-live Definition 交给**每一个可发现的真内核**的
- * ConversationNodeAssembler，按真机事件序列（含 transient 增量 + settleAssistant）
- * 驱动，断言全程不抛错、且节点只在有输出时可见。
+/* ══════════════════════ 场景 B3：功能五 已移除的 Definition 通道（v0.4.25 反向钉） ══════════════════════
+ * v0.4.25 把功能五从「assistant-actions 精确 pill + 自建 chat 节点 Definition」
+ * 整体迁到 conversation.composer.dock。原方案里最脆弱的一环是 Definition 的
+ * 「撤回了已物化节点」硬校验（v0.4.7 曾因此让整条 chat 快照链停更）—— 迁移后
+ * 这条链路彻底不存在，本节改为**反向钉**：源码里不得再出现那套锚点符号。
  *
- * 覆盖来源：$APPDATA/DSH-Exoskeleton/kernels/* 各副本 + app.asar 内桌面版自带内核。
- * **逐个内核各跑一遍**：任一版本失效都必须显式 FAIL，不能只测第一个。
- * ═══════════════════════════════════════════════════════════════════════════════════ */
-section("B3. 功能五 × 真内核 ConversationNodeAssembler（撤回校验 / transient 收尾，逐内核）");
+ * 保留此节的目的：防止有人「顺手」把 Definition 方案加回来而绕过 B2 的断言。
+ * ═══════════════════════════════════════════════════════════════════════════════ */
+section("B3. 功能五：Definition 通道已移除（反向钉）");
 {
+	const src = fs.readFileSync(BUNDLE, "utf8");
+	check("源码不再含 tspLiveDefinition（自建 chat 节点方案已删）",
+		!src.includes("function tspLiveDefinition"));
+	check("源码不再含 token-speed-live kind / TSP_LIVE_KIND / TSP_LIVE_ANCHOR",
+		!src.includes("token-speed-live") && !src.includes("TSP_LIVE_KIND") && !src.includes("TSP_LIVE_ANCHOR"));
+	check("源码不再含 tspChunkEffort（按 chunk 折算已改为按 partial.blocks 折算）",
+		!src.includes("tspChunkEffort"));
+	check("源码不再含 data-tsp-live（生成中估算条样式已并入 dock pill）",
+		!src.includes("data-tsp-live"));
+	// 真内核装配器仍可发现时，顺带确认本插件的注册面只有 slots，没有 events.register。
 	const kernels = loadKernelAssemblers();
-	if (kernels.length === 0) {
-		check("本机内核可载入 ConversationNodeAssembler（无内核则本节跳过）", false, "未找到内核副本，无法做真机装配回归");
-	}
-	// 逐个内核跑同一套真机时序：任一版本失效都必须显式 FAIL，
-	// 而不是「只测第一个、其余静默缺席」（issue #1 的 0.2.0-rc.1 就是这样漏掉的）。
-	for (const kernel of kernels) {
-		const KL = "[" + kernel.kernel + "] ";
-		const tspSrc = fs.readFileSync(BUNDLE, "utf8");
-		const pureStart = tspSrc.indexOf("/* ── 功能五取数段");
-		const pureEnd = tspSrc.indexOf("/* ── 功能五取数段结束 ── */");
-		const defStart = tspSrc.indexOf("function tspLiveDefinition()");
-		const defEnd = tspSrc.indexOf("function tspChatSource(ctx, sessionId)");
-		if (pureStart < 0 || pureEnd < 0 || defStart < 0 || defEnd < 0) throw new Error("功能五源码段定位失败");
-		const consts = tspSrc.slice(tspSrc.indexOf("const TSP_LIVE_KIND"), tspSrc.indexOf("const TSP_ZH = {"));
-		// eslint-disable-next-line no-new-func
-		const definition = new Function("console",
-			consts + "\n" + tspSrc.slice(pureStart, pureEnd) + "\n" + tspSrc.slice(defStart, defEnd)
-			+ "\nreturn tspLiveDefinition;")
-		({ warn: () => {}, error: () => {}, log: () => {} })();
-
-		const eventOf = (type, data, seq, extra) => ({ type: type, data: data, seq: seq, time: 1000 + seq, ...(extra ?? {}) });
-		const registry = () => ({ entries: () => [definition], subscribe: () => () => {}, fallbackEntry: () => undefined });
-		// 记录交给目标构建器的每一帧，用于断言「visible ↔ hidden」而不是「节点凭空消失」。
-		const frames = [];
-		const builder = {
-			empty: {},
-			replace(input) { frames.push(input.nodes.map((n) => n.kind + "/" + n.visibility).join(",")); return {}; },
-			apply(input) { frames.push(input.upserts.map((n) => n.kind + "/" + n.visibility).join(",")); return {}; }
-		};
-		const viewRegistry = {
-			entries: () => [{ target: "chat", create: () => builder }],
-			forTarget: (target) => (target === "chat" ? { create: () => builder } : undefined)
-		};
-		const assembler = new kernel.ConversationNodeAssembler(registry(), viewRegistry);
-		assembler.activateTarget("chat");
-		const errors = [];
-		const step = (run) => { try { run(); assembler.flush(); } catch (error) { errors.push(error.message); } };
-
-		const ATT = "attempt-1";
-		step(() => assembler.replaceWindow([
-			{ type: "event", event: eventOf("turn/start", { turn: 1 }, 1) },
-			{ type: "event", event: eventOf("step/start", { turn: 1, step: 0 }, 2) }
-		], false));
-		// 真机的流式增量是 transient（不是 durable event）。
-		step(() => assembler.append({ type: "transient", event: eventOf("assistant/live-chunk", { turn: 1, step: 0, attemptId: ATT, chunk: { type: "text-delta", text: "你好" } }, 3) }));
-		const visibleAfterChunk = frames.some((f) => f.includes("token-speed-live/visible"));
-		check(KL + "真内核：流式增量后节点物化为 visible", visibleAfterChunk, frames.join(" | "));
-
-		// 回合收尾：retire transient → replayContext 把状态倒推回「尚无输出」。
-		// v0.4.7 就在这里返回 null → withdrew 异常。
-		step(() => assembler.settleAssistant(ATT, { type: "event", event: eventOf("assistant/message", { turn: 1, step: 0, messageId: "m1", attemptId: ATT }, 4, { surfaceOp: "append" }) }));
-		check(KL + "真内核：settleAssistant 收尾不抛 withdrew（撤回校验回归钉）",
-			errors.length === 0, errors.join(" | ") || "无异常");
-		const hiddenAfterSettle = frames.some((f) => f.includes("token-speed-live/hidden"));
-		check(KL + "真内核：收尾后节点转为 hidden（让位精确 pill，而非撤回）", hiddenAfterSettle, frames.slice(-4).join(" | "));
-
-		step(() => assembler.append({ type: "event", event: eventOf("turn/end", { turn: 1 }, 5) }));
-
-		// 用户报告的核心症状：回合结束后**后续提问**能不能继续显示。
-		// seq 必须全局严格递增：内核 append() 对已存在的 seq 直接返回 "none" 丢弃，
-		// 用 base+offset 的算术会跨回合撞号（曾因此让本断言的 visible 计数少 1）。
-		let seq = 5;
-		const nextSeq = () => { seq += 1; return seq; };
-		for (const turn of [2, 3]) {
-			step(() => assembler.append({ type: "event", event: eventOf("user/message", { seq: nextSeq(), text: "question " + turn }, seq, { surfaceOp: "append" }) }));
-			step(() => assembler.append({ type: "event", event: eventOf("turn/start", { turn: turn }, nextSeq()) }));
-			step(() => assembler.append({ type: "event", event: eventOf("step/start", { turn: turn, step: 0 }, nextSeq()) }));
-			step(() => assembler.append({ type: "transient", event: eventOf("assistant/live-chunk", { turn: turn, step: 0, attemptId: "att-" + turn, chunk: { type: "text-delta", text: "reply " + turn } }, nextSeq()) }));
-			step(() => assembler.settleAssistant("att-" + turn, { type: "event", event: eventOf("assistant/message", { turn: turn, step: 0, messageId: "m" + turn, attemptId: "att-" + turn }, nextSeq(), { surfaceOp: "append" }) }));
-			step(() => assembler.append({ type: "event", event: eventOf("turn/end", { turn: turn }, nextSeq()) }));
-		}
-		check(KL + "真内核：多回合连续会话全程无异常（后续提问正常显示）",
-			errors.length === 0, errors.join(" | ") || "无异常");
-		const visibleFrames = frames.filter((f) => f.includes("token-speed-live/visible")).length;
-		check(KL + "真内核：每回合都重新物化出可见读数（visible 帧出现 3 次）",
-			visibleFrames === 3, "visible 帧数=" + visibleFrames);
-	}
+	check("本机内核可载入 ConversationNodeAssembler（无内核时此信息项不阻塞）",
+		kernels.length > 0, kernels.length === 0 ? "未找到内核副本（仅信息，不阻塞）" : kernels.map((k) => k.kernel).join(", "));
 }
 
 /* ══════════════════════ 场景 C：服务后到 ══════════════════════ */
@@ -1031,7 +906,7 @@ section("C. 服务后到：子 fiber 自动补挂（无需轮询）");
 
 	check("服务出现后子 fiber 自动 = ACTIVE", fibersOf(env.ctx, "alphaFeatures")[0]?.state === FIBER.ACTIVE, stateOf(fibersOf(env.ctx, "alphaFeatures")[0]));
 	check("补挂后功能五 速度计 pill 到位（子 fiber 函数体确实执行了）",
-		env.ledger.registered.includes("conversation.chat.assistant-actions/ui-tools-token-speed"),
+		env.ledger.registered.includes("conversation.composer.dock/ui-tools-token-speed"),
 		env.ledger.registered.join(", "));
 	check("功能三已移除：补挂后也不出现 conversation.view",
 		!env.ledger.registered.some((row) => row.startsWith("conversation.view/")),

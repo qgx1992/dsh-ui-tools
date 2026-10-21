@@ -31,7 +31,7 @@ DSH Web 插件：六个 UI 工具合并成一个包，只动对应控件，不�
 
 在官方**设置中心**新增一个「DSH UI 工具」页面，集中控制本包功能的偏好：
 
-- **布局偏好**：工作区徽章开关、启动时默认折叠所有工作区分组、在「用时」旁显示输出速度计（tok/s）；
+- **布局偏好**：工作区徽章开关、启动时默认折叠所有工作区分组、在输入框下方「N 轮 M 步」统计旁显示输出速度计（tok/s）；
 - 偏好经 **localStorage** 持久化（`dsh-ui-tools:prefs:v1`），刷新/重启后保持；
 - **能力感知（v0.4.2）**：速度计依赖的内核服务不可用时（`0.1.1-rc.x`），那一行开关**灰显**并在标签下提示「需内核 0.1.2-alpha.1+」，不会出现一个点了没用的开关。可用性由 `alphaFeatures` 子 fiber 实际激活来置位（比在 apply 期一次性探测更可靠：官方 provider 可能比本插件晚激活）。
 
@@ -39,24 +39,24 @@ DSH Web 插件：六个 UI 工具合并成一个包，只动对应控件，不�
 
 **实现原理**：注册进官方 **`settings.section`**（root 作用域 list 槽），`id: "dsh-ui-tools"`、`order: 100`、`label` 走双语文案，设置导航自动出现该页。页面组件订阅同一个 localStorage 偏好仓库（`useSyncExternalStore`），所有开关写入即落盘；既有功能在 `apply()` 里注入同一偏好仓库：徽章/速度计组件渲染时读开关，侧边栏折叠条在插件加载时按「默认折叠」偏好执行一次。
 
-## 功能五：输出速度计 tok/s（v0.4.6 新增）
+## 功能五：输出速度计 tok/s（v0.4.6 新增；v0.4.25 迁到输入框下方统计行）
 
-在**回合输出速度**上补一个常驻读数，两个位置：
+在**输入框下方**官方统计行（即「**N 轮 M 步**」那一行，与官方的 activity / usage 统计 pill 同一行）右侧，增加一个常驻的输出速度读数：
 
-- **回合结束后（精确值）**：在官方「**用时 xx秒**」pill **左侧**紧邻处显示 `⚡42 tok/s`，无需点开「本轮用时和速度」弹窗即可看到速度；
-- **生成中（估算值）**：回合进行时在消息流末尾显示 `⚡≈ 25 tok/s 生成中估算`，每秒刷新。
+- **回合结束后（精确值）**：显示 `⚡42 tok/s` —— 最近一回合的输出速度，无需点开「本轮用时和速度」弹窗即可看到；
+- **生成中（估算值）**：显示 `⚡≈ 25 tok/s · 生成中估算`，随流式增量刷新。
 
-数值口径（**精确值**）与内核「本轮用时和速度」弹窗里的 TPS **完全同源**：先按 `messageId` 定位回合，再折叠该回合全部已固化 assistant 节点，只累计**同时带 `timing.firstTokenTime` 与 `usage.outputTokens`** 的 step，按 `ΣoutputTokens ÷ Σ(completedTime − firstTokenTime)` 求值（对应内核 `deriveTurnMetrics` / `assistantStepReading`）；数据不足（无可计步、解码时长为 0）时**不显示**，绝不猜一个假值。
+> **与官方底部统计的关系**：官方那一行里的 TPS 是**全会话**口径（全程 `decodeTokens ÷ decodeMs`），本 pill 是**本回合 / 最近一回合**口径 —— 两者互补，本 pill 作为**新增**控件注册（`id: "ui-tools-token-speed"`、`order: 2`，排在官方 `activity`(0) / `usage`(1) 之后），不替换、不覆盖官方任何控件。
 
-**为什么生成中只能给估算值**：内核在流式期间**不上报 token 数** —— `assistant/live-chunk` 里的 `usage` chunk 被 `publication: "none"` 抑制，不推给客户端。所以生成中按已输出字符折算（CJK 1 字符 ≈ 1 token，其余 4 字符 ≈ 1 token），并**始终带「≈」与「生成中估算」标注**，与精确值明确区分；回合一旦结束即让位给精确 pill，不重复显示。
+数值口径（**精确值**）与内核「本轮用时和速度」弹窗里的 TPS **完全同源**：先定位回合（生成中以外取**最大回合**，`tspLastTurnSpeed`；按 `messageId` 的 `tspTurnSpeed` 仍保留以兼容既有断言），再折叠该回合全部已固化 assistant 节点，只累计**同时带 `timing.firstTokenTime` 与 `usage.outputTokens`** 的 step，按 `ΣoutputTokens ÷ Σ(completedTime − firstTokenTime)` 求值（对应内核 `deriveTurnMetrics` / `assistantStepReading`）；数据不足（无可计步、解码时长为 0）时**不显示**，绝不猜一个假值。
 
-**实现原理（不改源码的两条官方通道）**：
+**为什么生成中只能给估算值**：内核在流式期间**不上报 token 数** —— `assistant/live-chunk` 里的 `usage` chunk 被 `publication: "none"` 抑制，不推给客户端。所以生成中改为读 chat 快照里的 `legacy.partial`（内核在 assistant-step 运行期持续发布的 `{turn, step, blocks}`），按已输出字符折算（CJK 1 字符 ≈ 1 token，其余 4 字符 ≈ 1 token；`tspBlocksEffort` 统计 text / reasoning 正文与 tool-call 的 name+argsRaw），分母只计相邻增量之间的真实出字时间（间隔超过 `TSP_LIVE_GAP_CAP_MS`=1000ms 的停顿视为等工具/等请求、不计入），并**始终带「≈」与「生成中估算」标注**，与精确值明确区分；回合一旦结束（`partial` 消失）即让位给精确值，不重复显示。有效出字时间 < 250ms 或折算 token 为 0 时**不显示估算**，避免爆表读数。
 
-1. **精确 pill** 注册进官方 list 槽 **`conversation.chat.assistant-actions`**（session 作用域）。该槽的渲染位置就是 `MessageIconActions` 的 `extraActions` 位——**与官方「用时」pill 同一条动作条**，`order: -10` 使其排在官方 pill 之前（内核 list 槽按 `order` 升序渲染），即紧贴「用时」左侧。该槽当前亦被官方 `dsh-client-ui-message-feedback` 使用（`order: 10`），list 槽为加性，无占用冲突。节点数据经 `uiConversation.binding(sessionId).target("chat")` 读 chat target 快照（与官方 `useChat` 同源）。
-2. **生成中估算条** 走官方 Definition 通道 `ctx.uiConversation.events.register(...)`（`ui-goal`、`ui-workflow-run` 同款机制）自建一个 `token-speed-live` chat 节点，并用 `ctx.slots.inject("conversation.chat.node")` 以该 kind 注册渲染器。**为什么不用 `conversation.chat.turnTail`**：该槽的数据源必须匹配到 `turn/end` 才产出节点（`tailData` 无 `turn/end` 即返回 `null`），生成期间根本不存在；`assistant-actions` 所在动作条同理。节点的排序锚点刻意取一个大于任何真实事件 seq 的常量，使其稳定落在本回合末尾（若锚在首个增量处会因 `anchorSeq` 比较跑到流式正文上方）。
-3. Definition 通道是内核对等能力中较新的一个：形状不符时**只让生成中那段缺席**（`console.warn` 记录），绝不抛出——它处在 `alphaFeatures` 子 fiber 内，抛错会让 `capability.alphaApi` 回滚、连设置页的可用性提示一起判定为不可用。精确 pill 不依赖该通道。
+**实现原理（单一通道，不改源码）**：注册进官方 list 槽 **`conversation.composer.dock`**（session 作用域，渲染位就在 composer 下方的统计行）。组件 `TokenSpeedDockPill` 经槽位 `inject(sessionId)` 拿到插件自建的 `tspChat` 快照源（`uiConversation.binding(sessionId).target("chat")`，与官方 `useChat` 同一份快照），同时读 `legacy.nodes`（精确值）与 `legacy.partial`（生成中估算）。list 槽按 `order` 升序渲染、同 `id` 同 `order` 才替换官方控件，本插件用**新 id + order 2** 纯增量新增。
 
-**开关**：设置页「在「用时」旁显示输出速度计（tok/s）」，默认开；偏好字段 `tokenSpeedEnabled`（同一个 localStorage key）。旧内核上该开关灰显。
+> **v0.4.25 迁移说明**：此前（v0.4.6–v0.4.24）精确 pill 挂在 `conversation.chat.assistant-actions`（`order: -10`，紧贴「用时」左侧），生成中估算条走 Definition 通道自建 `token-speed-live` chat 节点 + `conversation.chat.node` 渲染器。后者因内核「已物化节点被撤回即抛错、整条 chat 快照链停更」（v0.4.7 事故）而成为长期风险面，且 Definition 节点不进 `legacy` 快照、dock 组件本就读不到。v0.4.25 把两处**合并为 dock 里的单条 pill**：删除 Definition 通道、`conversation.chat.node` 渲染器与旧 `assistant-actions` 注册，生成中改由 `legacy.partial` 折算 —— 风险面归零、位置也正落在用户要的「几轮几步旁边」。compat-check 相应新增「源码不得再出现 `tspLiveDefinition` / `token-speed-live` / `tspChunkEffort` / `data-tsp-live`」四条反向钉。
+
+**开关**：设置页「在输入框下方「几轮几步」旁显示输出速度计（tok/s）」，默认开；偏好字段 `tokenSpeedEnabled`（同一个 localStorage key）。旧内核上该开关灰显。
 
 > **历史回合为什么可能没有读数**：`firstTokenTime` 来自流式增量（瞬态事件，不进持久化日志），因此**重新加载页面后看到的历史回合**通常缺该字段——此时精确值不可得，插件与内核「用时」弹窗**都不显示 TPS**（同一口径、同一结论）。在本回合刚跑完、未重载页面的情况下读数正常。
 
@@ -252,7 +252,7 @@ ctx.inject(["sessions", "workspaces"], (scope) => {
 - 本插件通过 `modelDirectories` 服务读取同一份模型目录（groups = 供应商分组），注册到 `conversation.input.right`（list slot）追加双按钮；**v0.4.4**：该子作用域必须同时声明 `remote` **和** `remote.session`——内核对 `directoryFor()` 的实现会在**调用方**上下文里读 `this.ctx.remote.session`（cordis 的 Service tracker 会把 service 的 `this.ctx` 重绑到调用者），而 `remote.session` 是嵌套追踪服务，只声明 `remote` 仍会抛 `cannot get property "remote.session" without inject`；
 - 选择模型/推理等级时调用官方 `directory.select(...)`，官方 store 同步更新，输入框状态与原生一致；
 - 折叠条注册到 `sidebar.footer.action`——官方渲染位置就是 footer 顶部、紧贴工作区列表正下方，用 CSS（对齐 `--dsh-session-list-edge-inset` 内边距）贴合列表即可，**不搬动 DOM**。搬动 slot 渲染出来的节点会与框架重渲染互相触发，导致渲染进程 100% CPU 卡死（v0.1.0 全局观察器、v0.1.2 收窄观察器均因此卡死；v0.1.3 起彻底不搬）。
-- **跨内核分层（v0.4.2；v0.4.9 收窄）**：`uiConversation` 是 `0.1.2-alpha.1` 才引入的 client target 体系服务，旧内核 store 里没有它的提供方。因此这个**硬依赖不写在 loader entry 的 `inject` 上**（写了会让整个 entry 停在 PENDING，被 boot 末尾只遍历 `ctx.loader.entries()` 的审计判为失败 → `web boot: 1 entry did not activate` + `Failed to load plugins` 横幅，其余功能一起丢），而是收进 `ctx.plugin(alphaFeatures)` **子 fiber**：入口层只声明五个跨内核服务，功能五（速度计）整段注册（chat target 取数、`conversation.chat.assistant-actions` 注册、Definition 通道、TSP 文案）放在子 fiber 内，`alphaFeatures.inject = ["uiConversation"]`。旧内核上该子 fiber 停在 PENDING——cordis 不执行其函数体、不注册其 effect、也不计入审计，服务（哪怕延后出现）就绪时自动激活，并随 entry dispose 一并释放。渲染方式完全不变（纯 slot，无观察器/定时器）。
+- **跨内核分层（v0.4.2；v0.4.9 收窄）**：`uiConversation` 是 `0.1.2-alpha.1` 才引入的 client target 体系服务，旧内核 store 里没有它的提供方。因此这个**硬依赖不写在 loader entry 的 `inject` 上**（写了会让整个 entry 停在 PENDING，被 boot 末尾只遍历 `ctx.loader.entries()` 的审计判为失败 → `web boot: 1 entry did not activate` + `Failed to load plugins` 横幅，其余功能一起丢），而是收进 `ctx.plugin(alphaFeatures)` **子 fiber**：入口层只声明五个跨内核服务，功能五（速度计）整段注册（chat target 取数、`conversation.composer.dock` 注册、TSP 文案）放在子 fiber 内，`alphaFeatures.inject = ["uiConversation"]`。旧内核上该子 fiber 停在 PENDING——cordis 不执行其函数体、不注册其 effect、也不计入审计，服务（哪怕延后出现）就绪时自动激活，并随 entry dispose 一并释放。渲染方式完全不变（纯 slot，无观察器/定时器）。
 
 - 工作区徽章注册进 `conversation.session.header.actions`（见功能三）。
 - 设置页注册进 `settings.section`（见功能四）；所有偏好走 apply 期创建的一次性 localStorage 偏好仓库，组件经 `useSyncExternalStore` 订阅。
@@ -286,7 +286,7 @@ ctx.inject(["sessions", "workspaces"], (scope) => {
 - 该区间已对 npm 上全部 **29 个**已发布内核版本 + 3 个未来哨兵逐项断言，并保证普通 semver 语义与市场侧 `includePrerelease` 语义**判决一致**（见下「自检」）。
 - **v0.4.8 修正**：此前区间写作 `… || >=0.1.6-0`，其末项在**普通语义**下**不覆盖**任何 `0.1.7-*` / `0.2.0-*` 预发布版（只在 `includePrerelease` 下才成立），实测有 **6 条分流**（`0.1.7-alpha.1/2`、`0.1.7-rc.1/2`、`0.2.0-rc.1/2`）。原因同上一节：预发布版只与同 `x.y.z` 的元组比较，而 `>=0.1.6-0` 的下界落在 0.1.6 线。更隐蔽的是——当时 0b 的版本表**只列了 21 个**，恰好漏掉整条 0.1.7/0.2.0 线，于是「两种语义判决一致」那条断言**假绿**。现改为逐条发布线 `^0.1.6-0 || ^0.1.7-0 || ^0.2.0-0 || >=0.3.0-0` 并**全量列表**，令同类裂缝无处可藏。
 
-> **验证口径**：`node tools/compat-check.mjs` 跑在本机已装内核副本的**真实 cordis** 上（当前实测 `0.2.1-alpha.2`，**101/101** 全绿；断言计数随内核枚举动态变化，门槛是**零 FAIL** 而非某个具体数字，因此别把它当固定指标读），且场景 B3 会**逐内核遍历**本机全部可发现内核（`kernels/*` 各副本 + **`app.asar` 内桌面版自带内核**），断言五个功能的槽位注册、子 fiber 状态与 boot 审计口径；`0.1.7-rc.2` / `0.1.5-rc.2` / `0.1.2-alpha.3` 为历史验证点（这些内核副本**已不在本机**，本机现存副本为 `0.2.1-alpha.1` 与 `0.2.1-alpha.2`，B3 会跳过缺席者）。真机（浏览器）行为另由 `tools/live-smoke.mjs` 覆盖，需自备 URL+token（`0.2.1-alpha.2` 已实测：入口无横幅、五功能标记在位、设置页三行开关均正常）。
+> **验证口径**：`node tools/compat-check.mjs` 跑在本机已装内核副本的**真实 cordis** 上（v0.4.25 实测 **79/79** 全绿；断言计数随内核枚举动态变化，门槛是**零 FAIL** 而非某个具体数字，因此别把它当固定指标读。另注意它需要 `DSH_CORDIS_ENTRY` / `DSH_SEMVER_ENTRY` 指向可用的 cordis 与 semver——本机可指向仓库内 `.scratch/kernel/...`），场景断言五个功能的槽位注册、子 fiber 状态与 boot 审计口径；B3 自 v0.4.25 起改为「Definition 通道已移除」的源码反向钉（不再逐内核驱动装配器）。真机（浏览器）行为另由 `tools/live-smoke.mjs` 覆盖，需自备 URL+token。
 
 > **profile 安装漂移**：`tools/check-profile-drift.mjs` 会比对 `~/.dsh/profiles/*/` 三处口径——`package.json` 的声明、`pnpm-lock.yaml` 的 specifier 与 resolved 版本、`node_modules` 里实际安装的版本。三者不一致时必须先修 profile，否则「改了代码、刷新页面、毫无变化」——因为真实 GUI 跑的是 profile 里的安装副本，而 `compat-check.mjs` 读的**永远是仓库 `lib/client.js`**，两者是两份文件。
 
@@ -313,7 +313,7 @@ node tools/live-smoke.mjs <URL+token>   # 真机冒烟（可选；自动探测�
 
 `tools/check-model-seat-hug.mjs` 专治一类**静态阅读看不出来**的样式 bug：它把手写 DOM 骨架建成内核 `InputBar` 右侧动作区的真实层次（座位在 `div.standardControls` 内、听写按钮嵌在兄弟容器 `div.activity` 的 `span.triggerAnchor` 里），**求值** `MSS_CSS` 模板串（而不是只读源码文本）后用自写选择器匹配器逐条核对：座位父容器被推到最右、横缝收到 0、中英两套 `aria-label` 都命中、无座位/听写缺席时不误伤、CSS 里不出现内核哈希类名、官方模型按钮仍被隐藏。它也守住「模板串被反引号提前闭合」这类事故——那种情况下求值会失败或留下未展开的 `${...}`。本仓库零依赖，不引入 jsdom。
 
-`tools/compat-check.mjs` 不开浏览器也不重启服务：它从本机已装内核副本里加载 cordis，搭一个最小宿主把 `lib/client.js` 的 entry 挂上去，在「旧内核 / 新内核 / 服务后到 / 内核不提供 remote」四种主场景（外加声明层 0/0b、速度计 B2、真内核装配器 B3）下复刻 boot 的审计口径（只看 loader entry fiber 是否停在 PENDING），断言入口激活、子 fiber 状态、各槽位注册、功能一目录冷解析、设置页能力位（含三条「`conversation.view` / `uiSession.provide` / `workspaces.openPath` 永不被调用」的逆向钉），以及**功能五的数值口径、Definition 状态机与两个组件的 DOM/开关门控**（后三项直接截取 bundle 源码段执行，测的就是被测 bundle）。
+`tools/compat-check.mjs` 不开浏览器也不重启服务：它从本机已装内核副本里加载 cordis，搭一个最小宿主把 `lib/client.js` 的 entry 挂上去，在「旧内核 / 新内核 / 服务后到 / 内核不提供 remote」四种主场景（外加声明层 0/0b、速度计 B2、Definition 通道已移除的反向钉 B3）下复刻 boot 的审计口径（只看 loader entry fiber 是否停在 PENDING），断言入口激活、子 fiber 状态、各槽位注册、功能一目录冷解析、设置页能力位（含三条「`conversation.view` / `uiSession.provide` / `workspaces.openPath` 永不被调用」的逆向钉），以及**功能五的数值口径（`tspTurnSpeed`/`tspFoldTurn`/`tspLastTurnSpeed`/`tspBlocksEffort`）与 dock 组件的 DOM/开关门控**（后两项直接截取 bundle 源码段执行，测的就是被测 bundle）。
 
 另含**声明层断言**（场景 0b）：用内核自带的真实 `semver` 校验 `engines.dsh` 覆盖全部已发布内核版本、不误伤未来内核，并保证普通语义与市场侧 `includePrerelease` 语义判决一致——手搓匹配器会把「被测语义」偷换成「我以为的语义」，故不用。可用 `DSH_SEMVER_ENTRY=<...>/semver/index.js` 指定匹配器。
 
@@ -321,7 +321,17 @@ node tools/live-smoke.mjs <URL+token>   # 真机冒烟（可选；自动探测�
 
 ## 变更记录
 
-- **v0.4.24（本次）**：重做删除确认弹窗——位置不再偏右，观感与客户端对齐。
+- **v0.4.25（本次）**：把**功能五「输出速度计 tok/s」换位置** —— 从「官方『用时』pill 左侧 + 消息流末尾估算条」迁到**输入框下方官方统计行**（「N 轮 M 步」所在的那一行，与官方 activity / usage 统计 pill 同一行）。
+  - **用户要求（原文）**：「把插件的功能五换个地方显示」；被问放哪儿时答：「我在想放在底部几轮几步的旁边」。
+  - **位置实现**：新注册进官方 list 槽 **`conversation.composer.dock`**（session 作用域），`id: "ui-tools-token-speed"`、**`order: 2`**（官方 `activity`=0 / `usage`=1 之后，纯增量新增、不替换任何官方控件）。组件 `TokenSpeedDockPill` 经槽位 `inject(sessionId)` 取插件自建的 `tspChat` 快照源，渲染 `⚡42 tok/s`。视觉对齐官方 StatsPills（tertiary 文本、`tabular-nums`、`gap: 6px`、`padding: 1px 8px`、`border-radius: var(--dsw-radius-sm)`），不再有独立 `height: 28px` 的按钮感。
+  - **口径分工**：官方统计行里的 TPS 是**全会话**口径；本 pill 是**本回合 / 最近一回合**口径（`tspLastTurnSpeed`），两者互补。`tps.title` 文案明写这一区别，避免误解为重复。
+  - **删除 Definition 通道（风险面归零）**：生成中估算原走 `ctx.uiConversation.events.register` 自建 `token-speed-live` chat 节点 + `conversation.chat.node` 渲染器，这就是 v0.4.7「回合结束后界面不再刷新」事故的来源（内核 `buildTargetUpserts()` 见「已物化节点本帧返回 null」即抛 `withdrew materialized target`，整条 chat 快照链停更）。且 Definition 节点**不进 `legacy` 快照**，dock 组件本就读不到它的 data。故整体删除 `tspLiveDefinition`、`TokenSpeedLive`、`TokenSpeedPill`、`conversation.chat.node` 注册、`assistant-actions` 注册、`tspChunkEffort`、`TSP_LIVE_KIND` / `TSP_LIVE_ANCHOR` / `tspCurrentShapeWarned`。
+  - **生成中估算改走 `legacy.partial`**：内核在 assistant-step 运行期持续发布 `legacy.partial = {turn, step, blocks}`，新增纯函数 `tspBlocksEffort(blocks)` 按 `kind` 折算（text / reasoning → 正文；tool-call → `name + argsRaw`；image / other → 0），CJK 1 字 ≈ 1 token、其余 4 字 ≈ 1 token。分母只计**相邻增量帧之间的真实出字时间**，间隔超过 `TSP_LIVE_GAP_CAP_MS`（1000ms，常量移入「功能五取数段」以便 compat-check 截取作用域）视为等工具/等请求、不计入；有效出字 < 250ms 或折算 token 为 0 时不显示，避免爆表读数。估算始终带「≈」与「生成中估算」标注。
+  - **新增/保留的纯函数**：`tspFoldTurn(nodes, turn)`（按回合号折叠）、`tspLastTurnSpeed(nodes)`（取最大回合再折叠）、`tspBlocksEffort(blocks)`；`tspTurnSpeed(nodes, messageId)` 保留（定位回合后转调 `tspFoldTurn`），与内核「本轮用时和速度」弹窗同源同口径不变。
+  - **断言重写**：compat-check B2 整段改为 dock 契约（槽名 / `order: 2` / `name` 一致 / 反向钉「不再注册 `assistant-actions` 与 `chat.node`」/「`ledger.definitions` 为空」/ 三条新纯函数 / 精确值与估算两路 DOM）；B3 由「真内核装配器驱动 Definition」整节改为**反向钉**（源码不得再含 `tspLiveDefinition` / `token-speed-live` / `TSP_LIVE_*` / `tspChunkEffort` / `data-tsp-live`）；场景 C 的 `ledger.registered` 字符串改为 `conversation.composer.dock/ui-tools-token-speed`。live-smoke 的 2c 改为「dock 统计行」契约（与「N 轮 M 步」同行且在右侧、文案允许 `≈` 前缀、旧 `data-tsp-live` 必须为 0）。**compat-check 79/79**；hook 钉 7/7、座位钉 38/38、右键钉 228/228、漂移钉 3/3、live-smoke SKIP（无 URL）。
+  - **文档与版本**：`package.json` `0.4.24 → 0.4.25`、`description` 第 5 条重写为「显示在输入框下方、官方轮/步统计旁，生成中显示估算」；README 功能五整节重写并加迁移说明；设置页开关文案改为「在输入框下方「几轮几步」旁显示输出速度计（tok/s）」。
+
+- **v0.4.24**：重做删除确认弹窗——位置不再偏右，观感与客户端对齐。
   - **用户反馈（原文）**：「删除确认框UI有点跟客户端不一样，而且偏右，重新优化一下」。
   - **「偏右」根因**：`ctxConfirmDialog` 把 `window.innerWidth / 2` 当**左上角**传给了 `ctxPositionMenu(root, x, y)`（该函数收的就是左上角，内部还会 `Math.min(x, innerWidth - width - 6)` 夹一次），于是框从屏幕正中往右铺并被右边夹住。现在根节点用 `position: fixed; inset: 0` + `display: flex; align-items: center; justify-content: center` 居中，`ctxConfirmDialog` 里**再也没有** `ctxPositionMenu` 与 `innerWidth`。
   - **观感对齐**：结构、尺寸、间距、圆角、阴影、遮罩全部照 `dsh-web-frontend` 里那组官方 Modal 规则抄（`_root_ / _mask_ / _dialog_ / _header_ / _title_ / _content_ / _description_ / _footer_`），按钮照官方 Button 的 `md + outline` 规格（36px 高、`0.5px solid var(--dsw-alias-border-l3)` 描边、`14px/22px` 字）。颜色一律走 `--dsw-*` token，危险按钮用 `--dsw-alias-state-error-primary`（与官方删除确认的 `deleteAction` 同源）。按钮顺序与官方 footer 一致：**取消在左、危险动作在最右**。
