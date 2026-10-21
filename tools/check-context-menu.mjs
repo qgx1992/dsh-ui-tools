@@ -1807,28 +1807,37 @@ await (async () => {
 		const menu = document.body.querySelector(".dsh-ctx-menu");
 		const item = menu.querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("删除会话"));
 		item.dispatchEvent(makeEvent("click"));
-		// 菜单应被换成确认条
+		// 菜单应被换成确认弹窗（v0.4.24：不再是「菜单原地变条」，而是官方 Modal 形态）
 		const dialog = document.body.querySelector(".dsh-ctx-confirm");
-		if (dialog !== null) ok("点「删除会话…」先弹二次确认（菜单换成 alertdialog）");
+		if (dialog !== null) ok("点「删除会话…」先弹二次确认（菜单换成弹窗）");
 		else bad("点「删除会话…」没有二次确认 —— 一步就把数据删了");
-		if (dialog !== null && dialog.getAttribute("role") === "alertdialog") ok("确认条语义正确（role=alertdialog）");
-		else bad("确认条 role 不对");
+		const card = dialog === null ? null : dialog.querySelector(".dsh-ctx-confirm__dialog");
+		if (card !== null && card.getAttribute("role") === "alertdialog") ok("确认弹窗语义正确（role=alertdialog 在卡片上）");
+		else bad("确认弹窗 role 不对", card === null ? "（没有卡片）" : String(card.getAttribute("role")));
+		// 官方 Modal = 遮罩 + 居中卡片；两者缺一就不是同一套观感。
+		if (dialog !== null && dialog.querySelector(".dsh-ctx-confirm__mask") !== null) ok("确认弹窗有遮罩（与官方 Modal 一致）");
+		else bad("确认弹窗没有遮罩");
+		// 关键：确认弹窗不许复用右键菜单的样式类，否则又是「一眼外挂」。
+		if (dialog !== null && dialog.className.includes("dsh-ctx-menu") === false) ok("确认弹窗不再复用右键菜单样式（dsh-ctx-menu）");
+		else bad("确认弹窗仍复用右键菜单样式类", dialog === null ? "（无弹窗）" : dialog.className);
 		const dtext = dialog === null ? "" : dialog.textContent;
-		if (dtext.includes("会话甲")) ok("确认条点名了要删哪个会话", "会话甲");
-		else bad("确认条没说是哪个会话（用户无法核对）", dtext.slice(0, 60));
-		if (dtext.includes("无法撤销")) ok("确认条写明不可撤销");
-		else bad("确认条没写不可撤销");
+		if (dtext.includes("会话甲")) ok("确认弹窗点名了要删哪个会话", "会话甲");
+		else bad("确认弹窗没说是哪个会话（用户无法核对）", dtext.slice(0, 60));
+		if (dtext.includes("无法撤销")) ok("确认弹窗写明不可撤销");
+		else bad("确认弹窗没写不可撤销");
 		// 关键：此刻还**什么都没发出去**
 		if (stores.calls.deleted.length === 0) ok("确认前没有发出任何删除请求（不可撤销操作必须两步）", "0");
 		else bad("确认前就已经发出了删除请求", JSON.stringify(stores.calls.deleted));
 		if (stores.calls.archived.length === 0) ok("确认前也没有归档（本地列表没被提前摘掉）");
 		else bad("确认前就把行从列表摘掉了");
 
-		// 危险按钮必须排在最后一项，默认焦点在「取消」上（手滑回车不会删数据）
-		const dItems = dialog === null ? [] : dialog.querySelectorAll('[role="menuitem"]');
+		// 官方 Modal 的 footer 顺序：取消在左、危险动作在最右。
+		const dItems = dialog === null ? [] : dialog.querySelectorAll(".dsh-ctx-confirm__action");
 		const last = dItems[dItems.length - 1];
-		if (last !== void 0 && last.className.includes("dsh-ctx-item--danger")) ok("确认条里危险按钮排在最后一项");
-		else bad("确认条里危险按钮位置不对", last === void 0 ? "（无项）" : last.className);
+		if (dItems.length === 2 && dItems[0].textContent.includes("取消")) ok("确认弹窗按钮顺序与官方一致（取消在左）", dItems[0].textContent);
+		else bad("确认弹窗按钮顺序不对", dItems.map((node) => node.textContent).join("|"));
+		if (last !== void 0 && last.className.includes("dsh-ctx-confirm__action--danger")) ok("危险按钮在最右且带 --danger 修饰类", last.textContent);
+		else bad("危险按钮位置/样式不对", last === void 0 ? "（无项）" : last.className);
 		if (document.activeElement === dItems[0] && dItems[0].textContent.includes("取消")) ok("默认焦点在「取消」（回车不会误删）");
 		else bad("默认焦点不在取消上", document.activeElement === null ? "null" : document.activeElement.textContent);
 	}
@@ -1843,21 +1852,52 @@ await (async () => {
 		let menu = document.body.querySelector(".dsh-ctx-menu");
 		menu.querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("删除会话")).dispatchEvent(makeEvent("click"));
 		const dialog = document.body.querySelector(".dsh-ctx-confirm");
-		const cancel = dialog.querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("取消"));
+		const cancel = dialog.querySelectorAll(".dsh-ctx-confirm__action").find((node) => node.textContent.includes("取消"));
 		cancel.dispatchEvent(makeEvent("click"));
 		await Promise.resolve();
 		if (stores.calls.deleted.length === 0) ok("点「取消」不发删除请求", "0");
 		else bad("点「取消」竟然发了删除请求", JSON.stringify(stores.calls.deleted));
 		if (document.body.querySelector(".dsh-ctx-confirm") === null) ok("点「取消」后确认条消失");
 		else bad("点「取消」后确认条还挂在页面上");
-		// Escape 也要能取消
+		// Escape 也要能取消（事件挂在卡片上，所以就派发到卡片）
 		tree.sessionRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
 		menu = document.body.querySelector(".dsh-ctx-menu");
 		menu.querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("删除会话")).dispatchEvent(makeEvent("click"));
 		const dialog2 = document.body.querySelector(".dsh-ctx-confirm");
-		dialog2.dispatchEvent(makeEvent("keydown", { key: "Escape" }));
+		dialog2.querySelector(".dsh-ctx-confirm__dialog").dispatchEvent(makeEvent("keydown", { key: "Escape" }));
 		if (document.body.querySelector(".dsh-ctx-confirm") === null && stores.calls.deleted.length === 0) ok("Esc 也能取消（且不发请求）");
 		else bad("Esc 没能取消删除确认");
+
+		// 点右上角关闭键 = 取消
+		tree.sessionRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
+		menu = document.body.querySelector(".dsh-ctx-menu");
+		menu.querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("删除会话")).dispatchEvent(makeEvent("click"));
+		const dialog3 = document.body.querySelector(".dsh-ctx-confirm");
+		const closeBtn = dialog3.querySelector(".dsh-ctx-confirm__close");
+		if (closeBtn !== null) ok("确认弹窗有右上角关闭键（与官方 Modal 一致）");
+		else bad("确认弹窗没有关闭键");
+		closeBtn.dispatchEvent(makeEvent("click"));
+		if (document.body.querySelector(".dsh-ctx-confirm") === null && stores.calls.deleted.length === 0) ok("点关闭键 = 取消，不发请求");
+		else bad("点关闭键没能取消");
+
+		// 点遮罩空白处 = 取消（官方 Modal 的 onClose 语义）
+		tree.sessionRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
+		menu = document.body.querySelector(".dsh-ctx-menu");
+		menu.querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("删除会话")).dispatchEvent(makeEvent("click"));
+		const dialog4 = document.body.querySelector(".dsh-ctx-confirm");
+		dialog4.querySelector(".dsh-ctx-confirm__mask").dispatchEvent(makeEvent("pointerdown", { clientX: 5, clientY: 5 }));
+		if (document.body.querySelector(".dsh-ctx-confirm") === null && stores.calls.deleted.length === 0) ok("点遮罩空白处 = 取消，不发请求");
+		else bad("点遮罩没能取消");
+
+		// 点卡片本身（正文区域）**不该**关窗，否则用户选文字都会误关
+		tree.sessionRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
+		menu = document.body.querySelector(".dsh-ctx-menu");
+		menu.querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("删除会话")).dispatchEvent(makeEvent("click"));
+		const dialog5 = document.body.querySelector(".dsh-ctx-confirm");
+		dialog5.querySelector(".dsh-ctx-confirm__body").dispatchEvent(makeEvent("pointerdown", { clientX: 100, clientY: 100 }));
+		if (document.body.querySelector(".dsh-ctx-confirm") !== null) ok("点卡片正文不会误关确认弹窗");
+		else bad("点卡片正文竟然把确认弹窗关了");
+		dialog5.querySelector(".dsh-ctx-confirm__dialog").dispatchEvent(makeEvent("keydown", { key: "Escape" }));
 	}
 
 	// ── 运行时：确认 → 请求逐字正确，删完行真的消失 ──
@@ -1870,7 +1910,7 @@ await (async () => {
 		const menu = document.body.querySelector(".dsh-ctx-menu");
 		menu.querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("删除会话")).dispatchEvent(makeEvent("click"));
 		const dialog = document.body.querySelector(".dsh-ctx-confirm");
-		dialog.querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("永久删除")).dispatchEvent(makeEvent("click"));
+		dialog.querySelectorAll(".dsh-ctx-confirm__action").find((node) => node.textContent.includes("永久删除")).dispatchEvent(makeEvent("click"));
 		// ⚠ 这里必须让出**宏任务**，不能只 `await Promise.resolve()`。
 		//   客户端成功路径是 `rpc.call(...).then(...).then(...)` 三段链，
 		//   每段各占一个微任务；而 ctxToast 里用 `window.setTimeout(..., 1800)`
@@ -1934,7 +1974,7 @@ await (async () => {
 		install(envRel, { sessions: storesRel.sessions, workspaces: storesRel.workspaces, uiWorkspace: storesRel.uiWorkspace, connection: storesRel.connection });
 		treeRel.sessionRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
 		document.body.querySelector(".dsh-ctx-menu").querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("删除会话")).dispatchEvent(makeEvent("click"));
-		document.body.querySelector(".dsh-ctx-confirm").querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("永久删除")).dispatchEvent(makeEvent("click"));
+		document.body.querySelector(".dsh-ctx-confirm").querySelectorAll(".dsh-ctx-confirm__action").find((node) => node.textContent.includes("永久删除")).dispatchEvent(makeEvent("click"));
 		await new Promise((resolve) => setImmediate(resolve));
 		if (storesRel.calls.refreshed.length === 0) ok("负向对照：收尾被短路后「重拉基线」确实没发生（上面那条不是摆设）", "0");
 		else bad("负向对照失效：收尾被短路了却仍然 refresh 了", String(storesRel.calls.refreshed.length));
@@ -1977,7 +2017,7 @@ await (async () => {
 			install(env, { sessions: stores.sessions, workspaces: stores.workspaces, uiWorkspace: stores.uiWorkspace, connection: stores.connection });
 			tree.sessionRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
 			document.body.querySelector(".dsh-ctx-menu").querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("删除会话")).dispatchEvent(makeEvent("click"));
-			document.body.querySelector(".dsh-ctx-confirm").querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("永久删除")).dispatchEvent(makeEvent("click"));
+			document.body.querySelector(".dsh-ctx-confirm").querySelectorAll(".dsh-ctx-confirm__action").find((node) => node.textContent.includes("永久删除")).dispatchEvent(makeEvent("click"));
 			// 同前面那条注释：让出宏任务，否则假 window 的清理令牌会把
 			// 刚落地的「删除失败：…」一起清掉，断言只看得到「正在删除会话…」。
 			await new Promise((resolve) => setImmediate(resolve));
@@ -2015,7 +2055,7 @@ await (async () => {
 			const tree = buildTree(env);
 			tree.sessionRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
 			document.body.querySelector(".dsh-ctx-menu").querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("删除会话")).dispatchEvent(makeEvent("click"));
-			document.body.querySelector(".dsh-ctx-confirm").querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("永久删除")).dispatchEvent(makeEvent("click"));
+			document.body.querySelector(".dsh-ctx-confirm").querySelectorAll(".dsh-ctx-confirm__action").find((node) => node.textContent.includes("永久删除")).dispatchEvent(makeEvent("click"));
 			await new Promise((resolve) => setImmediate(resolve));
 			const toast = document.body.querySelector(".dsh-ctx-toast");
 			const text = toast === null ? "" : toast.textContent;
@@ -2049,7 +2089,7 @@ await (async () => {
 		if (item !== void 0 && item !== null) {
 			item.dispatchEvent(makeEvent("click"));
 			const dialog = document.body.querySelector(".dsh-ctx-confirm");
-			const confirm = dialog === null ? void 0 : dialog.querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("永久删除"));
+			const confirm = dialog === null ? void 0 : dialog.querySelectorAll(".dsh-ctx-confirm__action").find((node) => node.textContent.includes("永久删除"));
 			let threw = false;
 			if (confirm !== void 0 && confirm !== null) {
 				try { confirm.dispatchEvent(makeEvent("click")); } catch (error) { threw = true; }
@@ -2093,7 +2133,7 @@ await (async () => {
 		const tree = buildTree(env);
 		tree.sessionRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
 		document.body.querySelector(".dsh-ctx-menu").querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("删除会话")).dispatchEvent(makeEvent("click"));
-		document.body.querySelector(".dsh-ctx-confirm").querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("永久删除")).dispatchEvent(makeEvent("click"));
+		document.body.querySelector(".dsh-ctx-confirm").querySelectorAll(".dsh-ctx-confirm__action").find((node) => node.textContent.includes("永久删除")).dispatchEvent(makeEvent("click"));
 		await new Promise((resolve) => setImmediate(resolve));
 		const toast = document.body.querySelector(".dsh-ctx-toast");
 		const text = toast === null ? "" : toast.textContent;
@@ -2126,7 +2166,7 @@ await (async () => {
 			const tree = buildTree(env);
 			tree.sessionRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
 			document.body.querySelector(".dsh-ctx-menu").querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("删除会话")).dispatchEvent(makeEvent("click"));
-			document.body.querySelector(".dsh-ctx-confirm").querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("永久删除")).dispatchEvent(makeEvent("click"));
+			document.body.querySelector(".dsh-ctx-confirm").querySelectorAll(".dsh-ctx-confirm__action").find((node) => node.textContent.includes("永久删除")).dispatchEvent(makeEvent("click"));
 			await new Promise((resolve) => setImmediate(resolve));
 		const toast = document.body.querySelector(".dsh-ctx-toast");
 		const text = toast === null ? "" : toast.textContent;
@@ -2156,7 +2196,7 @@ await (async () => {
 			const tree = buildTree(env);
 			tree.sessionRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
 			document.body.querySelector(".dsh-ctx-menu").querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("删除会话")).dispatchEvent(makeEvent("click"));
-			document.body.querySelector(".dsh-ctx-confirm").querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("永久删除")).dispatchEvent(makeEvent("click"));
+			document.body.querySelector(".dsh-ctx-confirm").querySelectorAll(".dsh-ctx-confirm__action").find((node) => node.textContent.includes("永久删除")).dispatchEvent(makeEvent("click"));
 			await new Promise((resolve) => setImmediate(resolve));
 			const toast = document.body.querySelector(".dsh-ctx-toast");
 			const text = toast === null ? "" : toast.textContent;
@@ -2244,7 +2284,7 @@ function clickDeleteAndConfirm(env, tree, stores) {
 	item.dispatchEvent(makeEvent("click"));
 	const text = confirmText();
 	const dialog = document.body.querySelector(".dsh-ctx-confirm");
-	const confirm = dialog === null ? void 0 : dialog.querySelectorAll('[role="menuitem"]').find((node) => node.className.includes("dsh-ctx-item--danger"));
+	const confirm = dialog === null ? void 0 : dialog.querySelectorAll(".dsh-ctx-confirm__action").find((node) => node.className.includes("dsh-ctx-confirm__action--danger"));
 	if (confirm !== void 0) confirm.dispatchEvent(makeEvent("click"));
 	return text;
 }
@@ -2468,7 +2508,7 @@ await (async () => {
 		else bad("工作区批量删除没算级联子会话", text.replace(/\s+/g, " ").slice(0, 90));
 		fetchCalls.length = 0;
 		const dialog = document.body.querySelector(".dsh-ctx-confirm");
-		const confirm = dialog.querySelectorAll('[role="menuitem"]').find((node) => node.className.includes("dsh-ctx-item--danger"));
+		const confirm = dialog.querySelectorAll(".dsh-ctx-confirm__action").find((node) => node.className.includes("dsh-ctx-confirm__action--danger"));
 		confirm.dispatchEvent(makeEvent("click"));
 		await Promise.resolve().then(() => new Promise((resolve) => setTimeout(resolve, 10)));
 		const batchCall = fetchCalls.find((call) => String(call.url).includes("/sessionsDele"));
@@ -2478,6 +2518,75 @@ await (async () => {
 		if (sentIds.length === 3 && sentIds.includes("s1") && sentIds.includes("s2") && sentIds.includes("s5")) ok("工作区批量载荷 = 工作区全部会话 + 跨区子会话（3 个）", sentIds.join(","));
 		else bad("工作区批量载荷没带上跨区子会话", sentIds.join(",") || "（没发出去）");
 	}
+
+	section("16. v0.4.24：删除确认弹窗对齐官方 Modal（居中，不再偏右）");
+	await (async () => {
+		// ── 静态：确认弹窗的样式必须成套（遮罩 + 居中卡片 + 页脚按钮） ──
+		const cssStart = src.indexOf("const CTX_CSS = ");
+		const cssEnd = cssStart < 0 ? -1 : src.indexOf("\n`;", cssStart);
+		const cssText = cssStart < 0 || cssEnd < 0 ? "" : src.slice(cssStart, cssEnd);
+		if (cssText.length > 0) ok("能取到 CTX_CSS 模板串（后续样式断言有依据）", String(cssText.length) + " 字符");
+		else bad("取不到 CTX_CSS 模板串，后面的样式断言会全部空转");
+		const has = (needle) => cssText.includes(needle);
+		// 这几个是官方 Modal 的骨架类名，少一个就退回「一眼外挂」。
+		for (const needle of [".dsh-ctx-confirm__mask", ".dsh-ctx-confirm__dialog", ".dsh-ctx-confirm__header", ".dsh-ctx-confirm__title", ".dsh-ctx-confirm__content", ".dsh-ctx-confirm__body", ".dsh-ctx-confirm__footer", ".dsh-ctx-confirm__close", ".dsh-ctx-confirm__action", ".dsh-ctx-confirm__action--danger"]) {
+			if (has(needle)) ok("CTX_CSS 定义了 " + needle);
+			else bad("CTX_CSS 缺少 " + needle + "（确认弹窗会掉回菜单观感）");
+		}
+		// 居中靠 flex，而不是 JS 算坐标 —— 这是「偏右」的根因修复。
+		const centeringOk = (text) => /\.dsh-ctx-confirm\s*\{[^}]*position:\s*fixed[^}]*\}/.test(text)
+			&& /\.dsh-ctx-confirm\s*\{[^}]*align-items:\s*center[^}]*\}/.test(text)
+			&& /\.dsh-ctx-confirm\s*\{[^}]*justify-content:\s*center[^}]*\}/.test(text);
+		if (centeringOk(cssText)) ok("确认弹窗靠 fixed + flex 居中（不再用 JS 算 left/top）");
+		else bad("确认弹窗没有用 flex 居中 —— 这正是「偏右」的成因");
+		// 尺寸/配色照官方 Modal 与 Button 抄。
+		for (const needle of ["width: min(380px, 100%)", "--dsw-alias-bg-layer-2", "--dsw-elevation-prominent", "--dsw-radius-panel", "--dsw-alias-state-error-primary", "0.5px solid"]) {
+			if (has(needle)) ok("CTX_CSS 对齐官方规格：" + needle);
+			else bad("CTX_CSS 缺少官方规格 " + needle);
+		}
+		// 负向对照：把 justify-content: center 抽掉，上面那条居中钉必须变红。
+		const stripped = cssText.replace("justify-content: center;", "");
+		if (stripped !== cssText && centeringOk(stripped) === false) ok("负向对照：抽掉 justify-content: center 后「居中」断言会变红（上面那条不是摆设）");
+		else bad("负向对照失效：抽掉居中仍然判绿");
+
+		// ── 静态：偏右的根因代码不许回到 ctxConfirmDialog 里 ──
+		const confirmSrc = stripComments(extractFunction("ctxConfirmDialog"));
+		if (/ctxPositionMenu\s*\(/.test(confirmSrc) === false) ok("ctxConfirmDialog 不再自己算菜单坐标（不用 ctxPositionMenu）");
+		else bad("ctxConfirmDialog 又在算坐标了 —— 「偏右」会复发");
+		if (/innerWidth/.test(confirmSrc) === false && /innerHeight/.test(confirmSrc) === false) ok("ctxConfirmDialog 不再读视口宽高当坐标（偏右的直接成因）");
+		else bad("ctxConfirmDialog 又拿视口宽高当坐标了");
+		if (/dsh-ctx-menu/.test(confirmSrc) === false) ok("ctxConfirmDialog 不再复用右键菜单样式类");
+		else bad("ctxConfirmDialog 又套上了 dsh-ctx-menu");
+		// 负向对照：把坐标计算塞回去，两条钉都必须变红。
+		const reinjected = confirmSrc.replace("document.body.appendChild(root);", "ctxPositionMenu(root, window.innerWidth / 2, 10); document.body.appendChild(root);");
+		if (reinjected !== confirmSrc && /ctxPositionMenu\s*\(/.test(reinjected) && /innerWidth/.test(reinjected)) ok("负向对照：把坐标计算塞回去后「不再算坐标」两条钉都会变红（不是摆设）");
+		else bad("负向对照失效：塞回坐标计算仍然判绿");
+
+		// ── 运行时：弹窗里用到的类名必须都在 CTX_CSS 里有定义 ──
+		const env = buildEnv();
+		const tree = buildTree(env);
+		const stores = makeStores();
+		install(env, { sessions: stores.sessions, workspaces: stores.workspaces, uiWorkspace: stores.uiWorkspace, connection: stores.connection });
+		tree.sessionRow.dispatchEvent(makeEvent("contextmenu", { clientX: 20, clientY: 20 }));
+		document.body.querySelector(".dsh-ctx-menu").querySelectorAll('[role="menuitem"]').find((node) => node.textContent.includes("删除会话")).dispatchEvent(makeEvent("click"));
+		const root = document.body.querySelector(".dsh-ctx-confirm");
+		const used = [];
+		const walk = (node) => {
+			if (typeof node.className === "string" && node.className !== "") {
+				for (const name of node.className.split(/\s+/)) if (name.startsWith("dsh-ctx-confirm") && used.indexOf(name) < 0) used.push(name);
+			}
+			for (const child of node.children) walk(child);
+		};
+		if (root !== null) walk(root);
+		const undefinedClasses = used.filter((name) => cssText.includes("." + name) === false);
+		if (used.length >= 6 && undefinedClasses.length === 0) ok("确认弹窗用到的每个类名都有样式定义", used.join(","));
+		else bad("确认弹窗用了没定义的类名", undefinedClasses.join(",") || "（没采集到类名）");
+		// 结构化断言：卡片与遮罩必须都挂在根里（根负责铺满 + 居中）。
+		const cardInRoot = root !== null && root.querySelector(".dsh-ctx-confirm__dialog") !== null;
+		const maskInRoot = root !== null && root.querySelector(".dsh-ctx-confirm__mask") !== null;
+		if (cardInRoot && maskInRoot) ok("遮罩与卡片都挂在同一个 fixed 根节点下（flex 居中的前提）");
+		else bad("确认弹窗层级不对（遮罩或卡片没挂在根节点下）");
+	})();
 })();
 
 /* ══════════════════════════════════════════════════════════════
