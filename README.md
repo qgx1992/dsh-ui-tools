@@ -52,7 +52,7 @@ DSH Web 插件：六个 UI 工具合并成一个包，只动对应控件，不�
 
 **为什么生成中只能给估算值**：内核在流式期间**不上报 token 数** —— `assistant/live-chunk` 里的 `usage` chunk 被 `publication: "none"` 抑制，不推给客户端。所以生成中改为读 chat 快照里的 `legacy.partial`（内核在 assistant-step 运行期持续发布的 `{turn, step, blocks}`），按已输出字符折算（CJK 1 字符 ≈ 1 token，其余 4 字符 ≈ 1 token；`tspBlocksEffort` 统计 text / reasoning 正文与 tool-call 的 name+argsRaw），分母只计相邻增量之间的真实出字时间（间隔超过 `TSP_LIVE_GAP_CAP_MS`=1000ms 的停顿视为等工具/等请求、不计入），并**始终带「≈」与「生成中估算」标注**，与精确值明确区分；回合一旦结束（`partial` 消失）即让位给精确值，不重复显示。有效出字时间 < 250ms 或折算 token 为 0 时**不显示估算**，避免爆表读数。
 
-**实现原理（单一通道，不改源码）**：注册进官方 list 槽 **`conversation.composer.dock`**（session 作用域，渲染位就在 composer 下方的统计行）。组件 `TokenSpeedDockPill` 经槽位 `inject(sessionId)` 拿到插件自建的 `tspChat` 快照源（`uiConversation.binding(sessionId).target("chat")`，与官方 `useChat` 同一份快照），同时读 `legacy.nodes`（精确值）与 `legacy.partial`（生成中估算）。list 槽按 `order` 升序渲染、同 `id` 同 `order` 才替换官方控件，本插件用**新 id + order 2** 纯增量新增。
+**实现原理（单一通道，不改源码）**：注册进官方 list 槽 **`conversation.composer.dock`**（session 作用域，渲染位就在 composer 下方的统计行）。该槽是 **session 作用域**，内核槽框架会把 **`sessionId` 连同 `useChat` 等**作为**标准 props** 注入组件（官方 `ActivityPill` 就是用 `useChat(s => s.legacy.nodes)`）；因此组件 `TokenSpeedDockPill` 直接读标准 props 的 `useChat` 拿同一份 chat 快照（`legacy.nodes` 算精确值、`legacy.partial` 算生成中估算）。⚠️ 不能写成 `inject: (sessionId) => …` —— 槽的 `inject` 回调**不接收 sessionId**（v0.4.25 踩过此坑：拿到 `undefined` → 空快照 → pill 永远不渲染），只能返回 `{ prefs }` 这类注入面。list 槽按 `order` 升序渲染、同 `id` 同 `order` 才替换官方控件，本插件用**新 id + order 2** 纯增量新增。
 
 > **v0.4.25 迁移说明**：此前（v0.4.6–v0.4.24）精确 pill 挂在 `conversation.chat.assistant-actions`（`order: -10`，紧贴「用时」左侧），生成中估算条走 Definition 通道自建 `token-speed-live` chat 节点 + `conversation.chat.node` 渲染器。后者因内核「已物化节点被撤回即抛错、整条 chat 快照链停更」（v0.4.7 事故）而成为长期风险面，且 Definition 节点不进 `legacy` 快照、dock 组件本就读不到。v0.4.25 把两处**合并为 dock 里的单条 pill**：删除 Definition 通道、`conversation.chat.node` 渲染器与旧 `assistant-actions` 注册，生成中改由 `legacy.partial` 折算 —— 风险面归零、位置也正落在用户要的「几轮几步旁边」。compat-check 相应新增「源码不得再出现 `tspLiveDefinition` / `token-speed-live` / `tspChunkEffort` / `data-tsp-live`」四条反向钉。
 
@@ -286,7 +286,7 @@ ctx.inject(["sessions", "workspaces"], (scope) => {
 - 该区间已对 npm 上全部 **29 个**已发布内核版本 + 3 个未来哨兵逐项断言，并保证普通 semver 语义与市场侧 `includePrerelease` 语义**判决一致**（见下「自检」）。
 - **v0.4.8 修正**：此前区间写作 `… || >=0.1.6-0`，其末项在**普通语义**下**不覆盖**任何 `0.1.7-*` / `0.2.0-*` 预发布版（只在 `includePrerelease` 下才成立），实测有 **6 条分流**（`0.1.7-alpha.1/2`、`0.1.7-rc.1/2`、`0.2.0-rc.1/2`）。原因同上一节：预发布版只与同 `x.y.z` 的元组比较，而 `>=0.1.6-0` 的下界落在 0.1.6 线。更隐蔽的是——当时 0b 的版本表**只列了 21 个**，恰好漏掉整条 0.1.7/0.2.0 线，于是「两种语义判决一致」那条断言**假绿**。现改为逐条发布线 `^0.1.6-0 || ^0.1.7-0 || ^0.2.0-0 || >=0.3.0-0` 并**全量列表**，令同类裂缝无处可藏。
 
-> **验证口径**：`node tools/compat-check.mjs` 跑在本机已装内核副本的**真实 cordis** 上（v0.4.25 实测 **79/79** 全绿；断言计数随内核枚举动态变化，门槛是**零 FAIL** 而非某个具体数字，因此别把它当固定指标读。另注意它需要 `DSH_CORDIS_ENTRY` / `DSH_SEMVER_ENTRY` 指向可用的 cordis 与 semver——本机可指向仓库内 `.scratch/kernel/...`），场景断言五个功能的槽位注册、子 fiber 状态与 boot 审计口径；B3 自 v0.4.25 起改为「Definition 通道已移除」的源码反向钉（不再逐内核驱动装配器）。真机（浏览器）行为另由 `tools/live-smoke.mjs` 覆盖，需自备 URL+token。
+> **验证口径**：`node tools/compat-check.mjs` 跑在本机已装内核副本的**真实 cordis** 上（v0.4.26 实测 **81/81** 全绿；断言计数随内核枚举动态变化，门槛是**零 FAIL** 而非某个具体数字，因此别把它当固定指标读。另注意它需要 `DSH_CORDIS_ENTRY` / `DSH_SEMVER_ENTRY` 指向可用的 cordis 与 semver——本机可指向仓库内 `.scratch/kernel/...`），场景断言五个功能的槽位注册、子 fiber 状态与 boot 审计口径；B3 自 v0.4.25 起改为「Definition 通道已移除」的源码反向钉（不再逐内核驱动装配器）。真机（浏览器）行为另由 `tools/live-smoke.mjs` 覆盖，需自备 URL+token。
 
 > **profile 安装漂移**：`tools/check-profile-drift.mjs` 会比对 `~/.dsh/profiles/*/` 三处口径——`package.json` 的声明、`pnpm-lock.yaml` 的 specifier 与 resolved 版本、`node_modules` 里实际安装的版本。三者不一致时必须先修 profile，否则「改了代码、刷新页面、毫无变化」——因为真实 GUI 跑的是 profile 里的安装副本，而 `compat-check.mjs` 读的**永远是仓库 `lib/client.js`**，两者是两份文件。
 
@@ -321,7 +321,14 @@ node tools/live-smoke.mjs <URL+token>   # 真机冒烟（可选；自动探测�
 
 ## 变更记录
 
-- **v0.4.25（本次）**：把**功能五「输出速度计 tok/s」换位置** —— 从「官方『用时』pill 左侧 + 消息流末尾估算条」迁到**输入框下方官方统计行**（「N 轮 M 步」所在的那一行，与官方 activity / usage 统计 pill 同一行）。
+- **v0.4.26（本次）**：修 v0.4.25 真机上速度计**根本不渲染**的根因。
+  - **现象**：v0.4.25 装进 desktop profile 后，输入框下方统计行只有官方 activity / usage 两个 pill，插件的 `[data-tsp-pill]` 始终为 0（compat-check 却全绿）。
+  - **根因**：`conversation.composer.dock` 是 **session 作用域** 槽，`sessionId` 由内核槽框架作为**标准 props** 注入组件（官方 `ActivityPill` 直接 `useChat(s => s.legacy.nodes)` 即证据；同插件 `WorkspaceNameChip` 也是从 props 解构 `sessionId`，而它的 `inject` 只返回 `{ prefs }`、**不收参数**）。v0.4.25 误写成 `inject: (sessionId) => ({ hooks: { tspChat: tspChatSource(ctx, sessionId) } })`，真机上该形参恒为 `undefined` → `ctx.uiConversation.binding(undefined)` 抛错 → 走空快照兜底 → 组件 `legacy` 恒空 → 永远 `return null`。compat-check 的假 kernel 自己造了 sessionId 并直接喂 `useTspChat`，所以假绿、测不出。
+  - **修复**：注册改为 `inject: () => ({ prefs })`；`TokenSpeedDockPill` 优先取内核**标准 props 的 `useChat`**（`useChat(sel)` 与官方同款，`sel(s).legacy.nodes` / `.legacy.partial` 均可读），`useTspChat` 仅保留作单元测试兜底（真机不存在，取不到就走 `useChat`）。`tspChatSource` 保留未删（历史通道，无人调用不再影响渲染）。
+  - **断言补钉**：compat-check 新增两条 —— 「只给 `useChat` 也能算出末回合速度」（防线：不再依赖自造 inject）与「`useChat` 与 `useTspChat` 并存时优先用标准 `useChat`」；**compat-check 81/81**。
+  - **版本**：`0.4.25 → 0.4.26`。
+
+- **v0.4.25**：把**功能五「输出速度计 tok/s」换位置** —— 从「官方『用时』pill 左侧 + 消息流末尾估算条」迁到**输入框下方官方统计行**（「N 轮 M 步」所在的那一行，与官方 activity / usage 统计 pill 同一行）。
   - **用户要求（原文）**：「把插件的功能五换个地方显示」；被问放哪儿时答：「我在想放在底部几轮几步的旁边」。
   - **位置实现**：新注册进官方 list 槽 **`conversation.composer.dock`**（session 作用域），`id: "ui-tools-token-speed"`、**`order: 2`**（官方 `activity`=0 / `usage`=1 之后，纯增量新增、不替换任何官方控件）。组件 `TokenSpeedDockPill` 经槽位 `inject(sessionId)` 取插件自建的 `tspChat` 快照源，渲染 `⚡42 tok/s`。视觉对齐官方 StatsPills（tertiary 文本、`tabular-nums`、`gap: 6px`、`padding: 1px 8px`、`border-radius: var(--dsw-radius-sm)`），不再有独立 `height: 28px` 的按钮感。
   - **口径分工**：官方统计行里的 TPS 是**全会话**口径；本 pill 是**本回合 / 最近一回合**口径（`tspLastTurnSpeed`），两者互补。`tps.title` 文案明写这一区别，避免误解为重复。

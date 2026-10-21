@@ -841,6 +841,22 @@ section("B2. 功能五：输出速度计（dock 统计行 pill：末回合精确
 		check("dock pill：无任何可算数据时渲染 null（不显示假值）",
 			TokenSpeedDockPill({ useTspChat: (sel) => sel({ legacy: { nodes: [] } }), t, prefs: on }) === null);
 
+		// 标准 props 路径（真机唯一可靠来源）：dock 是 session 作用域槽，内核通过
+		// uiSession.provide({hooks:["chat"]}) 给组件注入 useChat（官方 ActivityPill
+		// 同款）。v0.4.25 首发曾误用 inject(sessionId)，真机上 sessionId 为
+		// undefined → 空快照 → 永不渲染；这里钉住「只给 useChat 也能算出来」。
+		const useChatStd = (sel) => sel(snapshot);
+		const stdEl = TokenSpeedDockPill({ useChat: useChatStd, t, prefs: on });
+		check("dock pill：走内核标准 props useChat 即可算出末回合速度（真机路径）",
+			flatten(stdEl) === "⚡30 tok/s", flatten(stdEl));
+		check("dock pill：useChat 与 useTspChat 同时存在时优先用标准 useChat",
+			TokenSpeedDockPill({
+				useChat: (sel) => sel({ legacy: { nodes: [] } }),
+				useTspChat: useTspChat,
+				t,
+				prefs: on
+			}) === null);
+
 		// 生成中估算路径：用可控 useRef + 受控时钟，模拟两帧流式增量。
 		let clock = 0;
 		const realNow = performance.now;
