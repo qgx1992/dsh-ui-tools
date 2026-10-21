@@ -259,6 +259,32 @@ function loadTspComponents(hooks = {}) {
 }
 
 /**
+ * 从 bundle 源码截取功能七的取数段（tswHasUnfinished + TodoSweeper），直接编译调用。
+ * reactStub 的 useEffect 是 noop，测不了副作用，这里默认换成「立即执行 + 收集
+ * 清理函数」的可控替身；document 默认 undefined（SSR 形态，effect 内的
+ * typeof 守卫会直接跳过）。
+ * @param {{ useEffect?: Function, document?: object }} hooks
+ * @returns {{ cleanups: Function[], tswHasUnfinished: Function, TodoSweeper: Function }}
+ */
+function loadTswComponent(hooks = {}) {
+	const src = fs.readFileSync(BUNDLE, "utf8");
+	const si = src.indexOf("/* ── 功能七取数段");
+	const ei = src.indexOf("/* ── 功能七取数段结束 ── */");
+	if (si < 0 || ei < 0) throw new Error("TSW 取数段定位失败");
+	const depSrc = src.slice(si, ei);
+	const usePrefs = (prefs) => reactStub.useSyncExternalStore(prefs.subscribe, prefs.getSnapshot);
+	const cleanups = [];
+	const fireEffect = (fn) => { const dispose = fn(); if (typeof dispose === "function") cleanups.push(dispose); };
+	// eslint-disable-next-line no-new-func
+	const factory = new Function("usePrefs", "useEffect", "document", depSrc
+		+ "\nreturn { tswHasUnfinished, TodoSweeper };");
+	return {
+		cleanups,
+		...factory(usePrefs, hooks.useEffect ?? fireEffect, hooks.document)
+	};
+}
+
+/**
  * 载入本机**全部可发现**的真内核 ConversationNodeAssembler（功能五最关键的一环）。
  *
  * 为什么必须用真内核而不是假内核：本插件功能五走 Definition 通道，内核
@@ -660,7 +686,8 @@ section("A. 旧内核（无 uiConversation）：静默降级");
 		["功能一 模型双按钮", "conversation.input.right/ui-tools-model-seat"],
 		["功能二 折叠条", "sidebar.footer.action/ui-tools-workspace-collapse"],
 		["功能三 工作区徽章", "conversation.session.header.actions/ui-tools-workspace-chip"],
-		["功能四 设置页", "settings.section/dsh-ui-tools"]
+		["功能四 设置页", "settings.section/dsh-ui-tools"],
+		["功能七 待办清扫", "conversation.input.dock/ui-tools-todo-sweeper"]
 	]) {
 		check(`旧内核保留 ${label}`, env.ledger.registered.includes(seat), seat);
 	}
@@ -677,7 +704,7 @@ section("A. 旧内核（无 uiConversation）：静默降级");
 
 /* ══════════════════════ 场景 B：新内核 0.1.2-alpha.1+ ══════════════════════ */
 
-section("B. 新内核（提供 uiConversation）：五个功能全部生效");
+section("B. 新内核（提供 uiConversation）：六个功能全部生效");
 {
 	const env = await mount({ alpha: true });
 	check("boot 审计 0 失败", env.failures.length === 0, env.failures.join(" | ") || "pass");
@@ -704,26 +731,28 @@ section("B. 新内核（提供 uiConversation）：五个功能全部生效");
 	const setFace = faceAt(env.seats, "settings.section");
 	check("capability.alphaApi = true → 速度计开关可用", setFace?.capability?.getSnapshot().alphaApi === true);
 
-	// v0.4.12：样式注入必须「只有一份共享标签，且五份 CSS 全在里面」。
-	// 历史缺陷：共享标签漏拼 WC_CSS，功能二又自建了一个只装 WC_CSS 的
-	// <style id="dsh-ui-tools-wc-collapse-style">，等于同一份规则注入两次、
-	// 且两个标签由不同 effect 各自拆卸（卸载中间帧会闪断折叠条样式）。
+	// v0.4.12：样式注入必须「只有一份共享标签，且全部 CSS 都在里面」
+	// （v0.4.28 起为六份）。历史缺陷：共享标签漏拼 WC_CSS，功能二又自建了
+	// 一个只装 WC_CSS 的 <style id="dsh-ui-tools-wc-collapse-style">，等于
+	// 同一份规则注入两次、且两个标签由不同 effect 各自拆卸（卸载中间帧会
+	// 闪断折叠条样式）。
 	{
 		const styleTags = env.logs.appended.filter((node) => node && node.tag === "style");
 		check("样式标签有且仅有一个（无第二份重复注入）",
 			styleTags.length === 1, `appendChild 的 <style> 数 = ${styleTags.length}`);
 		const css = styleTags[0]?.textContent ?? "";
-		// 五份 CSS 各自的哨兵选择器，必须都出现在共享标签里
+		// 六份 CSS 各自的哨兵选择器，必须都出现在共享标签里
 		const sentinels = [
 			["功能一 MSS_CSS", "[data-mss-seat]"],
 			["功能二 WC_CSS", ".wc-collapse-bar"],
 			["功能三 WSC_CSS", "[data-wsc-chip]"],
 			["功能四 SET_CSS", "[data-set-root]"],
-			["功能五 TSP_CSS", "[data-tsp-pill]"]
+			["功能五 TSP_CSS", "[data-tsp-pill]"],
+			["功能七 TSW_CSS", "[data-ui-tools-todo-sweep]"]
 		];
 		const missing = sentinels.filter(([, needle]) => !css.includes(needle)).map(([label]) => label);
-		check("共享样式标签含全部五份 CSS 哨兵（WC_CSS 不再漏拼）",
-			missing.length === 0, missing.length === 0 ? "五份齐全" : `缺失：${missing.join("、")}`);
+		check("共享样式标签含全部六份 CSS 哨兵（v0.4.28 起含 TSW_CSS）",
+			missing.length === 0, missing.length === 0 ? "六份齐全" : `缺失：${missing.join("、")}`);
 		check("不再存在功能二的独立 style 标签（id 已废弃）",
 			!styleTags.some((node) => node.id === "dsh-ui-tools-wc-collapse-style"),
 			styleTags.map((node) => `id=${String(node.id)}`).join(", ") || "（无 id）");
@@ -917,6 +946,100 @@ section("B2. 功能五：输出速度计（dock 统计行 pill：末回合精确
 }
 
 
+/* ══════════════════════ 场景 B4：功能七 待办清扫（v0.4.28） ══════════════════════
+ * 官方 TodoPanel 的转圈是内核「哑快照」缺口：todos 投影的 host reducer 只有
+ * todo/write 覆盖与 turn/start 清空，回合结束 / 停止 / 出错都不对账 —— 模型
+ * 最后一轮留下未完成项直接收尾时，面板带着 1.5s 转圈圆点永驻。
+ * 插件侧修复 = 同槽（conversation.input.dock）挂恒 null 哨兵：回合没在跑且
+ * todos 仍有 in_progress/pending 时给 <html> 打 data-ui-tools-todo-sweep，
+ * 由共享标签里的 TSW_CSS 隐藏官方面板本体 [data-testid="todo-panel"]。
+ * ═══════════════════════════════════════════════════════════════════════════════ */
+section("B4. 功能七：待办清扫（conversation.input.dock 对账哨兵）");
+{
+	const env = await mount({ alpha: true });
+
+	// ① 注册位：官方 todo(0) / queue(20) 之后，order 30，纯增量新增。
+	const dockRows = env.seats.get("conversation.input.dock") ?? [];
+	const sweeper = dockRows.find((row) => row.def.id === "ui-tools-todo-sweeper");
+	check("功能七哨兵注册进 conversation.input.dock", sweeper !== void 0,
+		env.ledger.registered.join(", "));
+	check("哨兵 order = 30（官方 todo 0 / queue 20 之后）", sweeper?.def.order === 30, String(sweeper?.def.order));
+	check("哨兵 name 与注册名一致（内核 buildNode 校验 name）",
+		sweeper?.def.name === "conversation.input.dock", String(sweeper?.def.name));
+
+	// ② 偏好默认开启（经 settings.section face 暴露的同一份 prefs 仓库）。
+	const setFace = faceAt(env.seats, "settings.section");
+	check("todoSweepEnabled 默认 = true", setFace?.prefs?.getSnapshot().todoSweepEnabled === true,
+		JSON.stringify(setFace?.prefs?.getSnapshot() ?? null));
+
+	// ③ 哨兵组件经 bundle 真实作用域直接调用，恒渲染 null（不产生可见节点）。
+	check("哨兵组件直接调用恒返回 null（真实 bundle 闭包）",
+		sweeper?.component?.({ prefs: setFace?.prefs }) === null);
+
+	// ④ 纯函数 + 副作用矩阵（取数段直译；useEffect 立即执行、document 用假 <html>）。
+	const tsw = loadTswComponent();
+	check("tswHasUnfinished：空列表 / 全 completed / 非数组 → false",
+		tsw.tswHasUnfinished([]) === false
+		&& tsw.tswHasUnfinished([{ status: "completed" }]) === false
+		&& tsw.tswHasUnfinished(null) === false);
+	check("tswHasUnfinished：in_progress / pending → true",
+		tsw.tswHasUnfinished([{ status: "in_progress" }]) === true
+		&& tsw.tswHasUnfinished([{ status: "pending" }]) === true);
+
+	const attrs = new Map();
+	const fakeDoc = { documentElement: {
+		setAttribute: (k, v) => { attrs.set(k, v); },
+		removeAttribute: (k) => { attrs.delete(k); }
+	} };
+	const tswDom = loadTswComponent({ document: fakeDoc });
+	const on = { getSnapshot: () => ({ todoSweepEnabled: true }), subscribe: () => () => {} };
+	const off = { getSnapshot: () => ({ todoSweepEnabled: false }), subscribe: () => () => {} };
+	const left = [{ status: "in_progress" }];
+	const allDone = [{ status: "completed" }];
+
+	attrs.clear(); tswDom.cleanups.length = 0;
+	tswDom.TodoSweeper({ session: { running: true }, useProjection: () => left, prefs: on });
+	check("回合进行中：不打属性（面板照常显示转圈）", !attrs.has("data-ui-tools-todo-sweep"),
+		`attrs=${[...attrs.entries()].map(([k, v]) => `${k}=${v}`).join(" ") || "空"}`);
+
+	attrs.clear(); tswDom.cleanups.length = 0;
+	tswDom.TodoSweeper({ session: { running: false }, useProjection: () => left, prefs: on });
+	check("回合结束 + 残留 in_progress：打属性 on（TSW_CSS 隐藏官方面板）",
+		attrs.get("data-ui-tools-todo-sweep") === "on");
+	const lastCleanup = tswDom.cleanups[tswDom.cleanups.length - 1];
+	check("组件卸载 cleanup 摘除属性（不留全局状态）",
+		typeof lastCleanup === "function" && (lastCleanup(), !attrs.has("data-ui-tools-todo-sweep")));
+
+	attrs.clear(); tswDom.cleanups.length = 0;
+	tswDom.TodoSweeper({ session: { running: false }, useProjection: () => allDone, prefs: on });
+	check("回合结束 + 待办全部完成：不打属性（面板本就该显示完成态）", !attrs.has("data-ui-tools-todo-sweep"));
+
+	attrs.clear(); tswDom.cleanups.length = 0;
+	tswDom.TodoSweeper({ session: { running: false }, useProjection: () => left, prefs: off });
+	check("开关关闭：不打属性", !attrs.has("data-ui-tools-todo-sweep"));
+
+	attrs.clear(); tswDom.cleanups.length = 0;
+	tswDom.TodoSweeper({ useProjection: () => left, prefs: on });
+	check("session 快照缺席（未知内核形态）：fail-open 不打属性", !attrs.has("data-ui-tools-todo-sweep"));
+
+	attrs.clear(); tswDom.cleanups.length = 0;
+	tswDom.TodoSweeper({ session: { running: false }, useProjection: void 0, prefs: on });
+	check("useProjection 缺席（kit 不给）：fail-open 不打属性", !attrs.has("data-ui-tools-todo-sweep"));
+
+	// SSR / 测试形态：document 缺席时 effect 直接跳过，不抛错、不留 cleanup。
+	const tswNoDoc = loadTswComponent();
+	tswNoDoc.TodoSweeper({ session: { running: false }, useProjection: () => left, prefs: on });
+	check("document 缺席（SSR 形态）：effect 跳过、不抛错", tswNoDoc.cleanups.length === 0);
+
+	// ⑤ 注册面反向钉：哨兵不建 Definition、不注册事件（纯槽位 + CSS）。
+	check("功能七不走 Definition 通道（ledger.definitions 仍为空）",
+		env.ledger.definitions.length === 0,
+		env.ledger.definitions.map((def) => def.kind).join(", ") || "（无）");
+
+	await env.entryFiber.dispose();
+}
+
+
 /* ══════════════════════ 场景 B3：功能五 已移除的 Definition 通道（v0.4.25 反向钉） ══════════════════════
  * v0.4.25 把功能五从「assistant-actions 精确 pill + 自建 chat 节点 Definition」
  * 整体迁到 conversation.composer.dock。原方案里最脆弱的一环是 Definition 的
@@ -982,7 +1105,8 @@ section("D. 内核不提供 remote：功能一优雅缺席，不拖垮 entry（�
 	for (const [label, seat] of [
 		["功能二 折叠条", "sidebar.footer.action/ui-tools-workspace-collapse"],
 		["功能三 工作区徽章", "conversation.session.header.actions/ui-tools-workspace-chip"],
-		["功能四 设置页", "settings.section/dsh-ui-tools"]
+		["功能四 设置页", "settings.section/dsh-ui-tools"],
+		["功能七 待办清扫", "conversation.input.dock/ui-tools-todo-sweeper"]
 	]) {
 		check(`remote 缺席时仍保留 ${label}`, env.ledger.registered.includes(seat), seat);
 	}
@@ -1000,5 +1124,5 @@ for (const row of results) {
 }
 const total = results.filter((row) => !row.section).length;
 console.log(`\n合计 ${total - failed}/${total} 通过（cordis：${located.kernel} → ${path.relative(process.cwd(), located.entry) || located.entry}）`);
-console.log("行为矩阵：新内核 5/5 槽位功能（功能六为纯 DOM、无 slot，不参与该矩阵）；旧内核 4/5 槽位功能 + 无横幅（功能五缺席属预期降级）");
+console.log("行为矩阵：新内核 6/6 槽位功能（功能六为纯 DOM、无 slot，不参与该矩阵）；旧内核 5/6 槽位功能 + 无横幅（功能五缺席属预期降级）");
 if (failed) process.exitCode = 1;

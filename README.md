@@ -1,6 +1,6 @@
 # dsh-ui-tools
 
-DSH Web 插件：六个 UI 工具合并成一个包，只动对应控件，不改 DSH 任何一行源码。
+DSH Web 插件：七个 UI 工具合并成一个包，只动对应控件，不改 DSH 任何一行源码。
 
 ## 功能一：模型选择双按钮（原 dsh-model-select-style）
 
@@ -251,6 +251,31 @@ ctx.inject(["sessions", "workspaces"], (scope) => {
 
 **开关**：设置页「会话 / 工作区列表右键菜单」，默认开；偏好字段 `ctxMenuEnabled`。**关掉时一根监听都不挂**，浏览器原生右键菜单原样保留；门控显式订阅偏好仓库，因此**改开关即时生效、无需刷新页面**，卸载时订阅与监听一并清理。
 
+## 功能七：待办清扫（v0.4.28 新增）
+
+会话回合结束后，输入框上方的官方待办面板（「任务」列表）若最后一份快照里还有 `in_progress` / `pending` 条目，会带着 1.5s 转圈圆点**永久挂着**，直到同会话发出下一条消息才消失。
+
+**这是内核的设计缺口，不是模型的错**：`todos` 投影的 host 端 reducer 只处理两个事件——`todo/write` 覆盖、`turn/start` 清空；**回合结束 / 停止 / 出错都不对账**。模型最后一轮留下未完成项直接收尾时，面板渲染的就是这份冻结快照；条目圆点 `StateDot` 只看 `status` 字符串，`in_progress` 恒为 ongoing 转圈。插件改不了 reducer，只能做**展示层对账**。
+
+### 做法
+
+在同一个 `conversation.input.dock` 槽位挂一个**恒渲染 null 的对账哨兵**（`id="ui-tools-todo-sweeper"`，`order` 30，排在官方 todo 0 / queue 20 之后）：
+
+1. 组件从内核渲染 dock 时传入的 `zone.session` 快照读 `running`（与官方 `TodoDock` 同源；另留标准 kit 的 `useProjection("todos")` 读待办清单）；
+2. **确知会话已收尾**（`session.running === false`）且待办仍有未完成项时，给 `<html>` 打 `data-ui-tools-todo-sweep="on"` 属性；
+3. 共享样式标签新增 `TSW_CSS`：`html[data-ui-tools-todo-sweep] [data-testid="todo-panel"]{display:none !important}` —— renderer 给槽位套的 `div[data-slot]` 是 `display:contents` 不参与布局，直接隐藏面板本体即可干净塌缩；
+4. 新一轮开始（`running === true`）或待办清空（面板本就渲染 null）后摘除属性，面板恢复；
+5. 组件卸载（切会话/关页面）时 `useEffect` cleanup 摘掉属性，不留全局状态。
+
+### 设计取舍
+
+- **fail-open**：`session` 快照缺席或形态未知（旧内核没传 `zone`、测试桩少参）时**一律不动手** —— 宁可少藏，也不能在会话可能正在跑时把面板盖掉；
+- **不搬 DOM、无 MutationObserver、无轮询定时器**（R2 铁律）：唯一的副作用就是一个 `<html>` 属性 + 一条 CSS 规则；
+- **不进 alphaFeatures 子 fiber**：哨兵只依赖 dock 槽渲染时的 `zone`/标准 kit，不碰 `uiConversation`/`uiSession` target 体系，新旧内核同一条注册路径；
+- **不用 `:has()` / 内核哈希类名**：选择器只含 `[data-testid="todo-panel"]`（官方自家测试锚点）与自有属性，内核升级不失效。
+
+**开关**：设置页「会话待办 → 回合结束后隐藏仍在转圈的『任务』待办面板」，默认开；偏好字段 `todoSweepEnabled`。断言：`compat-check` 场景 B4（注册位/默认值/纯函数口径/副作用矩阵/fail-open/卸载清理/反向钉）。
+
 ## 实现原理
 
 - 官方模型组件照常注册在 `conversation.input.model`（数据/提交逻辑原样保留），用 CSS 隐藏官方触发按钮；
@@ -261,8 +286,9 @@ ctx.inject(["sessions", "workspaces"], (scope) => {
 
 - 工作区徽章注册进 `conversation.session.header.actions`（见功能三）。
 - 设置页注册进 `settings.section`（见功能四）；所有偏好走 apply 期创建的一次性 localStorage 偏好仓库，组件经 `useSyncExternalStore` 订阅。
+- 待办清扫哨兵注册进 `conversation.input.dock`（见功能七）：恒 null 组件 + `<html>` 属性 + `TSW_CSS`，无 Observer、无定时器。
 
-六个功能各自独立命名空间（locale / slot id / data-* 前缀），互不干扰。
+七个功能各自独立命名空间（locale / slot id / data-* 前缀），互不干扰。
 
 > **v0.4.9 移除「修改的文件」选项卡**：它原本注册进官方 `conversation.view` 槽（v0.2.0 引入、v0.4.9 整体删除）。移除原因：其取数是同一份 chat target 快照的又一遍解析，与速度计重复；维护成本集中在 `run_code` 内嵌路径提取这类易碎逻辑上（模板串、变量拼接、shell 级写操作都解析不了）。随之下线的还有 `uiSession.provide` 暴露的 `useModifiedFiles` hook、`workspaces.openPath` 打开链路、`mfsCompact` 偏好与 `conversation.view` 槽注册——`alphaFeatures` 子 fiber 的 `inject` 因此收窄为 `["uiConversation"]`，跨内核降级机制本身完全未变。
 
@@ -270,8 +296,8 @@ ctx.inject(["sessions", "workspaces"], (scope) => {
 
 | DSH 内核 | 入口 fiber | `alphaFeatures` 子 fiber | boot 审计 | 横幅 | 可用功能 |
 |---|---|---|---|---|---|
-| `0.1.2-alpha.1` 及更新¹ | active | active | pass | 无 | 全部 5 项 |
-| `0.1.1-rc.1` / `0.1.1-rc.2` | active | pending（静默） | pass | 无 | 1 / 2 / 3 / 4（功能五缺席，设置页速度计开关灰显） |
+| `0.1.2-alpha.1` 及更新¹ | active | active | pass | 无 | 全部 6 项（含功能七） |
+| `0.1.1-rc.1` / `0.1.1-rc.2` | active | pending（静默） | pass | 无 | 1 / 2 / 3 / 4 / 7（功能五缺席，设置页速度计开关灰显） |
 
 > ¹ 「更新」指 **同属 0.1.2-alpha.1 之后的发布线**（`0.1.2-alpha.1` / `0.1.2-*` / `0.1.3-*` / `0.1.5-*` / `0.1.6-*` 及更高）。DSH 的预发布版按 semver 只与**同一 `x.y.z` 元组**比较，所以字面区间 `>=0.1.2-alpha.1` 在真实 semver 下**并不匹配** `0.1.5-rc.2`——本包因此按发布线逐条声明，而不是写一个连续区间，详见下节。
 
@@ -291,7 +317,7 @@ ctx.inject(["sessions", "workspaces"], (scope) => {
 - 该区间已对 npm 上全部 **29 个**已发布内核版本 + 3 个未来哨兵逐项断言，并保证普通 semver 语义与市场侧 `includePrerelease` 语义**判决一致**（见下「自检」）。
 - **v0.4.8 修正**：此前区间写作 `… || >=0.1.6-0`，其末项在**普通语义**下**不覆盖**任何 `0.1.7-*` / `0.2.0-*` 预发布版（只在 `includePrerelease` 下才成立），实测有 **6 条分流**（`0.1.7-alpha.1/2`、`0.1.7-rc.1/2`、`0.2.0-rc.1/2`）。原因同上一节：预发布版只与同 `x.y.z` 的元组比较，而 `>=0.1.6-0` 的下界落在 0.1.6 线。更隐蔽的是——当时 0b 的版本表**只列了 21 个**，恰好漏掉整条 0.1.7/0.2.0 线，于是「两种语义判决一致」那条断言**假绿**。现改为逐条发布线 `^0.1.6-0 || ^0.1.7-0 || ^0.2.0-0 || >=0.3.0-0` 并**全量列表**，令同类裂缝无处可藏。
 
-> **验证口径**：`node tools/compat-check.mjs` 跑在本机已装内核副本的**真实 cordis** 上（v0.4.27 实测 **85/85** 全绿；断言计数随内核枚举动态变化，门槛是**零 FAIL** 而非某个具体数字，因此别把它当固定指标读。另注意它需要 `DSH_CORDIS_ENTRY` / `DSH_SEMVER_ENTRY` 指向可用的 cordis 与 semver——本机可指向仓库内 `.scratch/kernel/...`），场景断言五个功能的槽位注册、子 fiber 状态与 boot 审计口径；B3 自 v0.4.25 起改为「Definition 通道已移除」的源码反向钉（不再逐内核驱动装配器）。真机（浏览器）行为另由 `tools/live-smoke.mjs` 覆盖，需自备 URL+token。
+> **验证口径**：`node tools/compat-check.mjs` 跑在本机已装内核副本的**真实 cordis** 上（v0.4.27 实测 **85/85** 全绿；断言计数随内核枚举动态变化，门槛是**零 FAIL** 而非某个具体数字，因此别把它当固定指标读。另注意它需要 `DSH_CORDIS_ENTRY` / `DSH_SEMVER_ENTRY` 指向可用的 cordis 与 semver——本机可指向仓库内 `.scratch/kernel/...`），场景断言六个功能的槽位注册、子 fiber 状态与 boot 审计口径；B3 自 v0.4.25 起改为「Definition 通道已移除」的源码反向钉（不再逐内核驱动装配器）；B4 自 v0.4.28 起覆盖功能七待办清扫（注册位/纯函数/副作用矩阵/fail-open）。真机（浏览器）行为另由 `tools/live-smoke.mjs` 覆盖，需自备 URL+token。
 
 > **profile 安装漂移**：`tools/check-profile-drift.mjs` 会比对 `~/.dsh/profiles/*/` 三处口径——`package.json` 的声明、`pnpm-lock.yaml` 的 specifier 与 resolved 版本、`node_modules` 里实际安装的版本。三者不一致时必须先修 profile，否则「改了代码、刷新页面、毫无变化」——因为真实 GUI 跑的是 profile 里的安装副本，而 `compat-check.mjs` 读的**永远是仓库 `lib/client.js`**，两者是两份文件。
 
@@ -303,7 +329,7 @@ node tools/check-hooks-order.mjs  # Hook 顺序钉：条件 return 不得夹在 
 node tools/check-model-seat-hug.mjs  # 功能一「座位紧贴听写按钮」的选择器回归钉（手写 DOM 骨架 + 求值真实 CSS）
 node tools/check-context-menu.mjs    # 功能六右键菜单钉：判据/三级降级/菜单组装/事件分发/键盘/拆卸/开关门控（手写 DOM 测试台）
 node tools/check-profile-drift.mjs   # profile 安装漂移钉：声明 / lock / 实装三者须一致
-node tools/compat-check.mjs      # 内核自适应回归（真实 cordis，场景 0/0b/A/B/B2/B3/C/D + 速度计组件/口径断言）
+node tools/compat-check.mjs      # 内核自适应回归（真实 cordis，场景 0/0b/A/B/B2/B4/B3/C/D + 速度计组件/口径断言）
 node tools/live-smoke.mjs <URL+token>   # 真机冒烟（可选；自动探测本机 Chrome/Edge）
 # 或一次跑完：npm run check
 ```
@@ -318,7 +344,7 @@ node tools/live-smoke.mjs <URL+token>   # 真机冒烟（可选；自动探测�
 
 `tools/check-model-seat-hug.mjs` 专治一类**静态阅读看不出来**的样式 bug：它把手写 DOM 骨架建成内核 `InputBar` 右侧动作区的真实层次（座位在 `div.standardControls` 内、听写按钮嵌在兄弟容器 `div.activity` 的 `span.triggerAnchor` 里），**求值** `MSS_CSS` 模板串（而不是只读源码文本）后用自写选择器匹配器逐条核对：座位父容器被推到最右、横缝收到 0、中英两套 `aria-label` 都命中、无座位/听写缺席时不误伤、CSS 里不出现内核哈希类名、官方模型按钮仍被隐藏。它也守住「模板串被反引号提前闭合」这类事故——那种情况下求值会失败或留下未展开的 `${...}`。本仓库零依赖，不引入 jsdom。
 
-`tools/compat-check.mjs` 不开浏览器也不重启服务：它从本机已装内核副本里加载 cordis，搭一个最小宿主把 `lib/client.js` 的 entry 挂上去，在「旧内核 / 新内核 / 服务后到 / 内核不提供 remote」四种主场景（外加声明层 0/0b、速度计 B2、Definition 通道已移除的反向钉 B3）下复刻 boot 的审计口径（只看 loader entry fiber 是否停在 PENDING），断言入口激活、子 fiber 状态、各槽位注册、功能一目录冷解析、设置页能力位（含三条「`conversation.view` / `uiSession.provide` / `workspaces.openPath` 永不被调用」的逆向钉），以及**功能五的数值口径（`tspTurnSpeed`/`tspFoldTurn`/`tspLastTurnSpeed`/`tspBlocksEffort`）与 dock 组件的 DOM/开关门控**（后两项直接截取 bundle 源码段执行，测的就是被测 bundle）。
+`tools/compat-check.mjs` 不开浏览器也不重启服务：它从本机已装内核副本里加载 cordis，搭一个最小宿主把 `lib/client.js` 的 entry 挂上去，在「旧内核 / 新内核 / 服务后到 / 内核不提供 remote」四种主场景（外加声明层 0/0b、速度计 B2、待办清扫 B4、Definition 通道已移除的反向钉 B3）下复刻 boot 的审计口径（只看 loader entry fiber 是否停在 PENDING），断言入口激活、子 fiber 状态、各槽位注册、功能一目录冷解析、设置页能力位（含三条「`conversation.view` / `uiSession.provide` / `workspaces.openPath` 永不被调用」的逆向钉），以及**功能五的数值口径（`tspTurnSpeed`/`tspFoldTurn`/`tspLastTurnSpeed`/`tspBlocksEffort`）与 dock 组件的 DOM/开关门控**（后两项直接截取 bundle 源码段执行，测的就是被测 bundle）。
 
 另含**声明层断言**（场景 0b）：用内核自带的真实 `semver` 校验 `engines.dsh` 覆盖全部已发布内核版本、不误伤未来内核，并保证普通语义与市场侧 `includePrerelease` 语义判决一致——手搓匹配器会把「被测语义」偷换成「我以为的语义」，故不用。可用 `DSH_SEMVER_ENTRY=<...>/semver/index.js` 指定匹配器。
 
@@ -326,7 +352,12 @@ node tools/live-smoke.mjs <URL+token>   # 真机冒烟（可选；自动探测�
 
 ## 变更记录
 
-- **v0.4.27（本次）**：修「回合结束后速度计整个消失」（v0.4.26 装到真机后的现象）。
+- **v0.4.28（本次）**：新增**功能七「待办清扫」**——修「会话结束后输入框上方的『任务』待办面板带着转圈圆点永驻」。
+  - **现象**：回合都结束了，官方 TodoPanel 还在转圈，直到同会话发出下一条消息才消失；
+  - **根因**：内核 `todos` 投影只有 `todo/write` 覆盖与 `turn/start` 清空两个事件，**回合结束不对账**（哑快照），模型留下未完成项直接收尾时面板就冻结在转圈态；
+  - **修复**：同槽（`conversation.input.dock`）挂恒 null 哨兵 `ui-tools-todo-sweeper`（order 30）：确知 `session.running === false` 且待办仍有 `in_progress`/`pending` 时给 `<html>` 打 `data-ui-tools-todo-sweep`，共享标签新增 `TSW_CSS` 隐藏 `[data-testid="todo-panel"]` 本体；新一轮开始或待办清空自动恢复，组件卸载时 cleanup 摘属性；
+  - **断言**：compat-check 新增场景 B4 共 17 条（注册位 order 30 / `todoSweepEnabled` 默认开 / `tswHasUnfinished` 纯函数口径 / 副作用矩阵：running 不打属性、idle+残留打 on、全完成不打、开关关不打、session 与 useProjection 缺席 fail-open、SSR 形态跳过、cleanup 摘除 / Definition 反向钉），共享标签样式哨兵五份 → 六份，98 → **103/103**；行为矩阵新内核 5/5 → **6/6** 槽位功能、旧内核 4/5 → **5/6**。
+- **v0.4.27**：修「回合结束后速度计整个消失」（v0.4.26 装到真机后的现象）。
   - **现象**：生成中能看到 `⚡≈ 245 tok/s · 生成中估算`，**回合一旦结束 pill 就消失**，统计行只剩官方 activity / usage 两枚。
   - **根因**：真机实测（React fiber 遍历 + 逐帧采样）发现内核 `legacy` 快照里 assistant 节点的 `timing.firstTokenTime` **恒为 `null`** —— 连**刚流式生成完**的回合落地后也是 `null`（`stepStartTime` / `completedTime` / `usage.outputTokens` 都在）。内核只在 durable log / `sessionStats` projection 里保留首字时间，客户端窗口的 settled 节点拿不到（官方 `ActivityPill` 显示 70 tok/s 是走 `useProjection("sessionStats")`，不是 `deriveStats(nodes)`）。原 `tspFoldTurn` 硬要求 `firstTokenTime` 为数字，于是 `sampled` 恒 false → 返回 `null` → pill 消失。compat-check 的假节点自带了 `firstTokenTime`，所以再次假绿。
   - **修复**：`tspFoldTurn` 改为**两级口径**——① 若有带 `firstTokenTime` 的 step，仍按内核解码口径 `ΣoutputTokens ÷ Σ(completedTime − firstTokenTime)`（墙钟 step 不参与分母）；② 所有 step 都缺 `firstTokenTime` 时回退**整步墙钟**口径 `ΣoutputTokens ÷ Σ(completedTime − stepStartTime)`（含首字延迟，`legacy` 快照恒可得）。tooltip 与 README 明确标注口径差异。
