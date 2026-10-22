@@ -280,7 +280,12 @@ client 侧无写入通道），只能做**展示层推断 + 恒展开渲染**。
    头部给「N 已完成 · N 进行中 · N 待处理」汇总，推断生效时带「按步数推断」小徽标；
 5. 渲染时给 `<html>` 打 `data-ui-tools-todo-mirror="on"`，共享样式标签的 `TSW_CSS` 单条规则
    `html[data-ui-tools-todo-mirror] [data-testid="todo-panel"]{display:none !important}` 隐藏官方本体，避免双层；
-6. 卸载 / 关开关时 `useEffect` cleanup 摘掉属性，官方待办面板原样恢复。
+6. 卸载 / 关开关时 `useEffect` cleanup 摘掉属性，官方待办面板原样恢复；
+7. **宽度与输入框卡片严格对齐**（v0.4.31）：镜像面板在 `conversation.input.dock` 里是独立块级元素，
+   `width: calc(100% - 16px)` 会按整列宽铺开、比输入框宽出一大截，所以改用内核自己的 composer 变量
+   `width: calc(100% - var(--dsh-composer-side-clearance,16px) - var(--dsh-composer-side-clearance,16px))`
+   再配 `max-width: var(--dsh-composer-card-max-width,952px)`——与输入框卡片同宽同左右边；
+   变量缺失（旧内核）时回退 16px/952px，仍是同级合理宽度。
 
 ### 设计取舍
 
@@ -333,7 +338,7 @@ client 侧无写入通道），只能做**展示层推断 + 恒展开渲染**。
 - 该区间已对 npm 上全部 **29 个**已发布内核版本 + 3 个未来哨兵逐项断言，并保证普通 semver 语义与市场侧 `includePrerelease` 语义**判决一致**（见下「自检」）。
 - **v0.4.8 修正**：此前区间写作 `… || >=0.1.6-0`，其末项在**普通语义**下**不覆盖**任何 `0.1.7-*` / `0.2.0-*` 预发布版（只在 `includePrerelease` 下才成立），实测有 **6 条分流**（`0.1.7-alpha.1/2`、`0.1.7-rc.1/2`、`0.2.0-rc.1/2`）。原因同上一节：预发布版只与同 `x.y.z` 的元组比较，而 `>=0.1.6-0` 的下界落在 0.1.6 线。更隐蔽的是——当时 0b 的版本表**只列了 21 个**，恰好漏掉整条 0.1.7/0.2.0 线，于是「两种语义判决一致」那条断言**假绿**。现改为逐条发布线 `^0.1.6-0 || ^0.1.7-0 || ^0.2.0-0 || >=0.3.0-0` 并**全量列表**，令同类裂缝无处可藏。
 
-> **验证口径**：`node tools/compat-check.mjs` 跑在本机已装内核副本的**真实 cordis** 上（v0.4.30 实测 **126/126** 全绿；断言计数随内核枚举动态变化，门槛是**零 FAIL** 而非某个具体数字，因此别把它当固定指标读。另注意它需要 `DSH_CORDIS_ENTRY` / `DSH_SEMVER_ENTRY` 指向可用的 cordis 与 semver——本机可指向仓库内 `.scratch/kernel/...`），场景断言七个功能的槽位注册、子 fiber 状态与 boot 审计口径；B3 自 v0.4.25 起改为「Definition 通道已移除」的源码反向钉（不再逐内核驱动装配器）；B4 自 v0.4.30 起覆盖功能七待办进度面板（注册位/纯函数推断口径/不降级/副作用矩阵/fail-open）。真机（浏览器）行为另由 `tools/live-smoke.mjs` 覆盖（含 2c 功能五胶囊浮窗契约与 2d 功能七待办进度面板 CSS 契约），需自备 URL+token。
+> **验证口径**：`node tools/compat-check.mjs` 跑在本机已装内核副本的**真实 cordis** 上（v0.4.31 实测 **127/127** 全绿；断言计数随内核枚举动态变化，门槛是**零 FAIL** 而非某个具体数字，因此别把它当固定指标读。另注意它需要 `DSH_CORDIS_ENTRY` / `DSH_SEMVER_ENTRY` 指向可用的 cordis 与 semver——本机可指向仓库内 `.scratch/kernel/...`），场景断言七个功能的槽位注册、子 fiber 状态与 boot 审计口径；B3 自 v0.4.25 起改为「Definition 通道已移除」的源码反向钉（不再逐内核驱动装配器）；B4 自 v0.4.30 起覆盖功能七待办进度面板（注册位/纯函数推断口径/不降级/副作用矩阵/fail-open）。真机（浏览器）行为另由 `tools/live-smoke.mjs` 覆盖（含 2c 功能五胶囊浮窗契约与 2d 功能七待办进度面板 CSS 契约），需自备 URL+token。
 
 > **profile 安装漂移**：`tools/check-profile-drift.mjs` 会比对 `~/.dsh/profiles/*/` 三处口径——`package.json` 的声明、`pnpm-lock.yaml` 的 specifier 与 resolved 版本、`node_modules` 里实际安装的版本。三者不一致时必须先修 profile，否则「改了代码、刷新页面、毫无变化」——因为真实 GUI 跑的是 profile 里的安装副本，而 `compat-check.mjs` 读的**永远是仓库 `lib/client.js`**，两者是两份文件。
 
@@ -368,7 +373,18 @@ node tools/live-smoke.mjs <URL+token>   # 真机冒烟（可选；自动探测�
 
 ## 变更记录
 
-- **v0.4.30（本次）**：**重构功能七**——用户指出 v0.4.28 理解错了需求。
+- **v0.4.31（本次）**：**修功能七镜像面板过宽**（用户：「你是有毒吗，把待办拉那么宽干什么？把宽度跟输入框对齐」）。
+  - **根因**：`[data-todo-mirror]` 用的是 `width: calc(100% - 16px)`。它在 `conversation.input.dock` 里是独立块级元素，
+    `100%` 取的是整个 composer 列宽（比输入框卡片宽出一大截），减 16px 仍远宽于输入框，于是面板左右各溢出一截。
+  - **修法**：改用内核自己的 composer 变量——`width: calc(100% - var(--dsh-composer-side-clearance,16px) - var(--dsh-composer-side-clearance,16px))`
+    配 `max-width: var(--dsh-composer-card-max-width,952px)`，得到与输入框卡片**同宽、同左右边**的结果；
+    变量缺失（旧内核）时回退 16px / 952px，仍是同级合理宽度，且不引入任何写死像素的绝对定位。
+  - **断言**：compat-check B1 新增「镜像面板宽度与输入框对齐（width 用 side-clearance + max-width 用 card-max-width）」的**数值级**样式哨兵
+    （只扫选择器会被旧实现假绿，故必须查两个变量名与 `width`/`max-width` 同现），**126 → 127/127**；`live-smoke` 2d 增加真机宽度实测
+    （镜像面板与输入框卡片的 `getBoundingClientRect` 宽度差 ≤ 2px、左右边缘差 ≤ 2px）。
+  - **文档与版本**：`package.json` `0.4.30 → 0.4.31`、`description` 追加本条；README 功能七「做法」补第 7 条与本节、验证口径（127/127）同步；AGENT.md §4/§6.3 口径同步。
+
+- **v0.4.30**：**重构功能七**——用户指出 v0.4.28 理解错了需求。
   - **用户原话**：「功能七你是不是理解错了，我是想解决待办列表不按进度更新状态的问题，不是消不消失的问题」；随后在选项里明确了两个痛点：①「模型写完一次待办就不再更新，列表停在进行中」；②「折叠时不显示每项状态，希望不展开也能看到进度」。
   - **形态变化**：v0.4.28 是「回合结束后隐藏仍在转圈的待办面板」的**恒 null 哨兵**；v0.4.30 换成 `conversation.input.dock`（`id="ui-tools-todo-progress"`，`order: 30`）的**镜像进度面板** `TodoProgressDock` —— 自己渲染一份「每项状态点始终可见、永不折叠」的面板，同时用 `<html>` 属性 `data-ui-tools-todo-mirror` + `TSW_CSS` 单条规则隐藏官方本体，避免双层。
   - **按进度推进（展示层推断）**：读 `useProjection("todos")` 与 `useProjection("sessionStats").steps`；`tswSignature` 认列表身份并记下首现时的步数基线，`tswAdvanceFromSteps(stepsSince, TSW_STEPS_PER_ITEM=2)` 每 2 步推进一项（回合收尾至少 +1），`tswDeriveStatuses(todos, advance, running)` 叠加推断状态。三条硬约束：**内核已判 `completed` 的绝不降级**、**运行中不把最后一项判完成**、**空闲不新造 `in_progress`**。

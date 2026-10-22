@@ -810,6 +810,12 @@ section("B. 新内核（提供 uiConversation）：六个功能全部生效");
 		const tswRule = /html\[data-ui-tools-todo-mirror\]\s*\[data-testid="todo-panel"\]\s*\{[^}]*display\s*:\s*none\s*!important[^}]*\}/.test(css);
 		check("功能七 TSW_CSS 隐藏规则完整（作用域 + 目标 + display:none !important）",
 			tswRule, tswRule ? "规则完整" : "规则缺失或未带 display:none !important");
+		// v0.4.31：镜像面板宽度必须与输入框卡片对齐 —— 用 side-clearance 变量算出与输入框
+		// 同宽，并用 card-max-width 兜住；正负对照见 tools/live-smoke.mjs 2d（真机量宽度）。
+		// 只查选择器会被「宽度写死 calc(100% - 16px)」的旧实现假绿，所以这里查数值+变量。
+		const mirrorWidthRule = /\[data-todo-mirror\]\s*\{[^}]*width\s*:\s*calc\(\s*100%\s*-\s*var\(--dsh-composer-side-clearance[^}]*max-width\s*:\s*var\(--dsh-composer-card-max-width/.test(css);
+		check("功能七 镜像面板宽度与输入框对齐（width 用 side-clearance + max-width 用 card-max-width）",
+			mirrorWidthRule, mirrorWidthRule ? "对齐规则齐全" : "缺少 side-clearance / card-max-width 宽度规则");
 		check("不再存在功能二的独立 style 标签（id 已废弃）",
 			!styleTags.some((node) => node.id === "dsh-ui-tools-wc-collapse-style"),
 			styleTags.map((node) => `id=${String(node.id)}`).join(", ") || "（无 id）");

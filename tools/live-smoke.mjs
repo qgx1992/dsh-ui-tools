@@ -515,6 +515,24 @@ try {
 		check("镜像面板（会话有待办时）每项都有合法 data-status + 状态点 glyph + 文案（折叠态也看得见）",
 			tsw.hasMirror ? tsw.mirrorAllGood === true : true,
 			tsw.hasMirror ? `items=${tsw.mirrorItems} allGood=${tsw.mirrorAllGood}` : "本会话未生成镜像面板（信息项，不阻塞）");
+		// v0.4.31：镜像面板宽度必须与输入框卡片对齐（此前 calc(100% - 16px) 会撑到整列宽）。
+		// 输入框卡片的选择器不要写死哈希类名（`.RlGAzG_card` 会随内核升级失效），
+		// 改为「contenteditable 的最近 _card 祖先」——与真机实测的 DOM 结构一致。
+		const align = await page.evaluate(() => {
+			const mirror = document.querySelector("[data-todo-mirror]");
+			const ce = document.querySelector('[contenteditable="true"]');
+			if (!mirror || !ce) return null;
+			let card = ce;
+			while (card && card !== document.body && !/_card/.test(String(card.className))) card = card.parentElement;
+			if (!card || card === document.body) return null;
+			const m = mirror.getBoundingClientRect();
+			const c = card.getBoundingClientRect();
+			return { mLeft: Math.round(m.left), mRight: Math.round(m.right), mW: Math.round(m.width), cLeft: Math.round(c.left), cRight: Math.round(c.right), cW: Math.round(c.width) };
+		});
+		check("镜像面板与输入框卡片左右对齐（宽度差 ≤ 2px、边缘差 ≤ 2px）",
+			align === null ? true
+				: (Math.abs(align.mW - align.cW) <= 2 && Math.abs(align.mLeft - align.cLeft) <= 2 && Math.abs(align.mRight - align.cRight) <= 2),
+			align === null ? "本会话无镜像面板或输入框卡片（信息项）" : JSON.stringify(align));
 		await page.screenshot({ path: path.join(OUT, "07-todo-progress.png") });
 	}
 
