@@ -3,12 +3,12 @@
  * dsh-ui-tools 真机无头冒烟（人工验收辅助，不属于发布产物）
  *
  * 用 puppeteer-core + 本机已装的 Chromium 内核浏览器打开正在运行的 DSH Web，
- * 断言当前版本（v0.4.28，七功能）在真实内核下：
+ * 断言当前版本（v0.4.29，七功能）在真实内核下：
  *   ① 没有 `Failed to load plugins` / `entry did not activate` 横幅；
  *   ② 插件确实激活（共享 style 标签在位 + 各功能 DOM 标记出现）；
  *   ③ 功能一双按钮座位真的渲染、没有静默降级回官方控件；
  *   ④ 打开设置中心「DSH UI 工具」页并截图（人工复核视觉）；
- *   ⑤ 功能五速度计（输入框下方统计行）与内核 TPS 口径一致；
+ *   ⑤ 功能五速度计（v0.4.29 起为可拖动胶囊悬浮窗）与内核 TPS 口径一致；
  *   ⑥ 功能七待办清扫的 TSW_CSS 隐藏规则与 <html> 属性契约真机生效；
  *   ⑦ 顺带渲染 demo/settings.html 的新旧内核两种状态，核对灰显样式。
  *
@@ -101,7 +101,7 @@ const MARKERS = {
 	collapseBar: "[data-wc-collapse-bar]",
 	chip: "[data-wsc-chip]",
 	settingsRoot: "[data-set-root]",
-	// v0.4.6 功能五：精确速度 pill（回合结束后，紧邻「用时」）与生成中估算条。
+	// v0.4.6 功能五：输出速度读数（v0.4.29 起在可拖动胶囊 [data-tsp-capsule] 里）。
 	tokenSpeedPill: "[data-tsp-pill]"
 };
 
@@ -290,12 +290,14 @@ try {
 		check("（前置）当前会话已有回合内容，无需切换", true, "already on a session with turns");
 	}
 
-	console.log("\n2c. 功能五：输出速度计（输入框下方统计行，真机取数）");
+	console.log("\n2c. 功能五：输出速度计（可拖动胶囊悬浮窗，真机取数）");
 	{
-		// pill 挂在 composer 下方的统计行（「N 轮 M 步」那一行），与官方 activity 统计
-		// pill 同一行、排在其右侧（v0.4.25 从 assistant-actions 迁入）。
-		// 注意：本环境的会话里可能正有一条回合在生成，此时 pill 会显示「≈ N tok/s · 生成中估算」，
-		// 这是设计行为，故位置/格式断言必须容忍估算形态。
+		// v0.4.29：功能五从「输入框下方统计行里的固定 pill」改成可随意拖动的胶囊
+		// 悬浮窗（createPortal 挂到 document.body，position:fixed）。因此本段断言
+		// 从「与官方 activity 同一行、排其右侧」改为「脱离统计行、fixed 浮层、
+		// 可拖动且拖动后位置落进 localStorage」。
+		// 注意：本环境的会话里可能正有一条回合在生成，此时胶囊会显示
+		// 「≈ N tok/s · 生成中估算」，这是设计行为，故格式断言必须容忍估算形态。
 		const backToChat = await page.evaluate(() => {
 			const rows = [...document.querySelectorAll("button, [role=tab], [role=button]")]
 				.filter((el) => (el.textContent || "").trim() === "对话");
@@ -333,55 +335,87 @@ try {
 		if (kernel.found !== true) {
 			check("（跳过，信息）无法打开内核「用时」弹窗，本轮不校验 TPS 口径一致性", true, JSON.stringify(kernel));
 		} else if (isEstimate) {
-			check("（跳过，信息）pill 处于生成中估算形态，内核弹窗只覆盖已结束回合，本轮不校验口径一致性", true, pills[0].text);
+			check("（跳过，信息）胶囊处于生成中估算形态，内核弹窗只覆盖已结束回合，本轮不校验口径一致性", true, pills[0].text);
 		} else {
-			check("功能五 pill 与内核 TPS 口径一致（内核有则必须有，内核无则必须无）",
+			check("功能五胶囊与内核 TPS 口径一致（内核有则必须有，内核无则必须无）",
 				kernel.hasTps ? pills.length > 0 : pills.length === 0,
 				`kernelHasTps=${kernel.hasTps} pills=${pills.length}`);
 		}
 
-		// 位置契约：必须落在 composer 下方的 dock 统计行里，且排在官方 activity
-		// （「N 轮 M 步」那枚）的右侧。直接拿 [data-composer-stat="activity"] 做基准，
-		// 比逐个 leaf 猜文本稳（官方 pill 内部结构是哈希类名，可能重构）。
-		const pos = await page.evaluate((sel) => {
+		// 胶囊契约：外层 [data-tsp-capsule] 必须是 position:fixed 浮层、已脱离
+		// 输入框下方的统计行（不在 [data-composer-dock] 里）、带可拖动光标。
+		const cap = await page.evaluate((sel) => {
 			const pill = document.querySelector(sel);
 			if (!pill) return { ok: "no-pill" };
-			const dock = pill.closest("[data-composer-dock]");
-			const official = dock ? dock.querySelector('[data-composer-stat="activity"]') : null;
-			if (!official) return { ok: "no-official", inDock: !!dock };
-			const pr = pill.getBoundingClientRect();
-			const or = official.getBoundingClientRect();
+			const capsule = pill.closest("[data-tsp-capsule]");
+			if (!capsule) return { ok: "no-capsule" };
+			const cs = getComputedStyle(capsule);
+			const r = capsule.getBoundingClientRect();
 			return {
 				ok: "ok",
-				inDock: true,
-				sameRow: Math.abs((pr.top + pr.bottom) / 2 - (or.top + or.bottom) / 2) <= 8,
-				rightOf: pr.left >= or.right - 1,
-				officialText: (official.textContent || "").trim().slice(0, 40),
-				dockText: (dock.textContent || "").trim().slice(0, 90),
+				position: cs.position,
+				cursor: cs.cursor,
+				inComposerDock: !!capsule.closest("[data-composer-dock]"),
+				inBody: capsule.parentElement === document.body,
+				left: capsule.style.left,
+				top: capsule.style.top,
+				rect: { x: r.left, y: r.top, w: r.width, h: r.height },
 			};
 		}, MARKERS.tokenSpeedPill);
-		console.log(`     dock 位置探针：${JSON.stringify(pos)}`);
+		console.log(`     胶囊契约探针：${JSON.stringify(cap)}`);
+
+		let dragResult = null;
+		if (cap.ok === "ok" && cap.rect.w > 0 && cap.rect.h > 0) {
+			const cx = cap.rect.x + cap.rect.w / 2;
+			const cy = cap.rect.y + cap.rect.h / 2;
+			await page.mouse.move(cx, cy);
+			await page.mouse.down();
+			await page.mouse.move(cx - 170, cy - 130, { steps: 14 });
+			await page.mouse.up();
+			await new Promise((r) => setTimeout(r, 350));
+			dragResult = await page.evaluate(() => {
+				const pill = document.querySelector("[data-tsp-pill]");
+				const capsule = pill ? pill.closest("[data-tsp-capsule]") : null;
+				const raw = localStorage.getItem("dsh-ui-tools:token-speed:pos:v1");
+				return { left: capsule?.style.left ?? null, top: capsule?.style.top ?? null, stored: raw };
+			});
+			console.log(`     拖动后：${JSON.stringify(dragResult)}`);
+			// 拖完复位（双击 = 回到默认位 + 清掉持久化），避免污染后续人工使用。
+			await page.evaluate(() => {
+				const pill = document.querySelector("[data-tsp-pill]");
+				const capsule = pill ? pill.closest("[data-tsp-capsule]") : null;
+				if (capsule) capsule.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+			});
+			await new Promise((r) => setTimeout(r, 250));
+		}
 
 		if (pills.length > 0) {
 			// 精确值 `⚡N tok/s`，或生成中估算 `⚡≈ N tok/s · 生成中估算`（允许长尾说明）。
-			check("pill 文案形如「⚡N tok/s」或「⚡≈ N tok/s · 生成中估算」",
+			check("胶囊读数文案形如「⚡N tok/s」或「⚡≈ N tok/s · 生成中估算」",
 				/^\u26a1\s*(≈\s*)?\d+(\.\d)? tok\/s(\s*·\s*.+)?$/.test(pills[0].text), pills[0].text);
-			check("pill 带可访问标签", pills[0].aria.length > 0, pills[0].aria);
-			check("pill 落在输入框下方统计行（data-composer-dock）内，且与「N 轮 M 步」同一行（v0.4.25 dock 契约）",
-				pos.ok === "ok" && pos.inDock === true && pos.sameRow === true, JSON.stringify(pos));
-			check("pill 排在「N 轮 M 步」统计右侧（不覆盖官方控件）",
-				pos.ok === "ok" && pos.rightOf === true, JSON.stringify(pos));
+			check("胶囊读数带可访问标签", pills[0].aria.length > 0, pills[0].aria);
+			check("胶囊外壳带 data-tsp-capsule 且为 position:fixed 浮层（不再钉在统计行）",
+				cap.ok === "ok" && cap.position === "fixed", JSON.stringify({ ok: cap.ok, position: cap.position }));
+			check("胶囊已脱离输入框下方统计行（不在 [data-composer-dock] 内）且挂到 body",
+				cap.ok === "ok" && cap.inComposerDock === false && cap.inBody === true,
+				JSON.stringify({ inComposerDock: cap.inComposerDock, inBody: cap.inBody }));
+			check("胶囊带可拖动光标（cursor: grab / move）",
+				cap.ok === "ok" && /grab|move/.test(cap.cursor), cap.cursor);
+			check("真实鼠标拖拽后胶囊坐标变化并写入 localStorage（位置记忆）",
+				dragResult !== null && dragResult.stored !== null
+					&& (dragResult.left !== cap.left || dragResult.top !== cap.top),
+				JSON.stringify({ before: { left: cap.left, top: cap.top }, after: dragResult }));
 			if (isEstimate) {
-				check("生成中估算 pill 是 role=status 的 polite 区域",
+				check("生成中估算胶囊是 role=status 的 polite 区域",
 					pills[0].role === "status", pills[0].role);
 			}
 		} else {
-			check("（信息）本会话当前没有可显示的回合读数，pill 缺席", true, "no pills");
+			check("（信息）本会话当前没有可显示的回合读数，胶囊缺席", true, "no pills");
 		}
-		// 生成中估算条已并入 dock pill（同名 [data-tsp-pill]），不再有独立节点。
+		// 生成中估算已并入胶囊读数（同一个 [data-tsp-pill]），不再有独立节点。
 		const liveCount = await page.evaluate(() => document.querySelectorAll("[data-tsp-live]").length);
 		check("不再存在旧版独立生成中估算条（data-tsp-live 已移除）", liveCount === 0, String(liveCount));
-		check("（前置）回到对话视图以便读取 pill", backToChat || pills.length > 0, String(backToChat));
+		check("（前置）回到对话视图以便读取胶囊", backToChat || pills.length > 0, String(backToChat));
 		await page.screenshot({ path: path.join(OUT, "06-token-speed.png") });
 	}
 

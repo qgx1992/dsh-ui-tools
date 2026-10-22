@@ -136,10 +136,20 @@ const reactStub = {
 	useMemo: (fn) => fn()
 };
 
+/** react-dom 桩：createPortal 用一个带标记的包裹对象表示「已 portal 到 container」。 */
+const reactDomStub = {
+	createPortal: (node, container) => ({ type: "@portal", props: { container }, children: [node] })
+};
+
 /** 假 DOM：apply() 期只有 style 注入与查询；不引入观察器/定时器（本插件铁律）。 */
 function makeFakeDom(logs) {
 	const byId = new Map();
+	const body = {
+		appendChild: (node) => { logs.appended.push(node); return node; },
+		children: []
+	};
 	return {
+		body,
 		head: { appendChild: (node) => { logs.appended.push(node); return node; } },
 		getElementById: (id) => byId.get(id) ?? null,
 		querySelector: () => null,
@@ -147,6 +157,7 @@ function makeFakeDom(logs) {
 			tag,
 			dataset: {},
 			textContent: "",
+			appendChild(node) { return node; },
 			remove() { /* noop */ },
 			set id(value) { byId.set(value, this); },
 			get id() { return ""; }
@@ -183,8 +194,11 @@ function loadClientBundle(logs) {
 	if (!captured) throw new Error("bundle 未调用 window.__ModuleLoader__.load");
 	const mod = captured.factory((id) => {
 		required.push(id);
-		// client 模块表铁律：除 react（seed word）外不得 require 任何 DSH client 包。
+		// client 模块表铁律：只允许 react（seed word）与 react-dom（web 平台模块表既有
+		// 条目，内核 bundle 与 dsh-better-sidebar 等都 require 它），不得 require 任何
+		// DSH client 包。v0.4.29 起功能五胶囊用 react-dom 的 createPortal。
 		if (id === "react") return reactStub;
+		if (id === "react-dom") return reactDomStub;
 		throw new Error(`require 了模块表外的包：${id}`);
 	});
 	return { id: captured.id, mod, required };
@@ -216,7 +230,7 @@ await tools.mkdir({ dirs: ["src/nested", "src/empty"] });` }) }
 /**
  * 从 bundle 源码截取功能五取数段，直接测 tsp* 纯函数（不经 VDOM/hooks）。
  * 与 loadClientBundle 同一份 BUNDLE 源码，保证测的就是被测 bundle。
- * @returns {{ tspFormatTps: Function, tspEstimateTokens: Function, tspBlocksEffort: Function, tspFoldTurn: Function, tspLastTurnSpeed: Function, tspTurnSpeed: Function }}
+ * @returns {{ tspFormatTps: Function, tspEstimateTokens: Function, tspBlocksEffort: Function, tspFoldTurn: Function, tspLastTurnSpeed: Function, tspTurnSpeed: Function, tspReadPos: Function, tspWritePos: Function, tspClearPos: Function, tspClampPos: Function, tspDefaultPos: Function, TSP_POS_KEY: string }}
  */
 function loadTspSpeed() {
 	const src = fs.readFileSync(BUNDLE, "utf8");
@@ -225,18 +239,21 @@ function loadTspSpeed() {
 	if (si < 0 || ei < 0) throw new Error("TPS 取数段定位失败");
 	const depSrc = src.slice(si, ei);
 	// eslint-disable-next-line no-new-func
-	return new Function(depSrc + "\nreturn { tspFormatTps, tspEstimateTokens, tspBlocksEffort, tspFoldTurn, tspLastTurnSpeed, tspTurnSpeed };")();
+	return new Function("localStorage", "window", depSrc + "\nreturn { tspFormatTps, tspEstimateTokens, tspBlocksEffort, tspFoldTurn, tspLastTurnSpeed, tspTurnSpeed, tspReadPos, tspWritePos, tspClearPos, tspClampPos, tspDefaultPos, TSP_POS_KEY };")(
+		makeFakeLocalStorage(), void 0
+	);
 }
 
 /**
- * 从 bundle 源码截取功能五的 dock 组件，用 reactStub 直接调用（不经真 DOM）。
- * 组件的 DOM 结构与偏好开关门控都能在这里断言 —— 不必依赖真机截图。
- * @param hooks - 可选 hooks 覆写（例如把 useRef 钉成可控累积器，测估算速度）。
- * @returns {{ TokenSpeedDockPill: Function }}
+ * 从 bundle 源码截取功能五的胶囊组件，用 reactStub 直接调用（不经真 DOM）。
+ * 组件的 DOM 结构、portal 目标、拖动句柄与偏好开关门控都能在这里断言。
+ * @param hooks - 可选 hooks 覆写（useRef/useState/createPortal/document/localStorage/window）。
+ * @returns {{ TokenSpeedDockPill: Function, tspReadPos: Function, tspWritePos: Function, tspClearPos: Function, tspClampPos: Function, tspDefaultPos: Function, TSP_POS_KEY: string, storage: object }}
  */
 function loadTspComponents(hooks = {}) {
 	const src = fs.readFileSync(BUNDLE, "utf8");
-	// 纯函数段与组件段都要（组件调用 tspFormatTps / tspLastTurnSpeed / tspBlocksEffort）。
+	// 纯函数段与组件段都要（组件调用 tspFormatTps / tspLastTurnSpeed / tspBlocksEffort，
+	// 以及位置工具 tspReadPos / tspWritePos / tspClampPos / tspDefaultPos）。
 	const pureStart = src.indexOf("/* ── 功能五取数段");
 	const pureEnd = src.indexOf("/* ── 功能五取数段结束 ── */");
 	const compStart = src.indexOf("function TokenSpeedDockPill(props)");
@@ -246,16 +263,24 @@ function loadTspComponents(hooks = {}) {
 	// 组件只依赖 react、usePrefs（uSES 封装）与上面的纯函数；usePrefs 在 stub 下
 	// 等价于「读快照」，因此把 prefs 仓库直接喂给 useSyncExternalStore 即可。
 	const usePrefs = (prefs) => reactStub.useSyncExternalStore(prefs.subscribe, prefs.getSnapshot);
+	const storage = hooks.localStorage ?? makeFakeLocalStorage();
+	const doc = hooks.document ?? void 0;
+	const win = hooks.window ?? void 0;
 	// eslint-disable-next-line no-new-func
-	const factory = new Function("react", "usePrefs", "useState", "useEffect", "useMemo", depSrc
-		+ "\nreturn { TokenSpeedDockPill };");
-	return factory(
+	const factory = new Function("react", "usePrefs", "useState", "useEffect", "useMemo", "createPortal", "document", "localStorage", "window", depSrc
+		+ "\nreturn { TokenSpeedDockPill, tspReadPos, tspWritePos, tspClearPos, tspClampPos, tspDefaultPos, TSP_POS_KEY };");
+	const api = factory(
 		{ ...reactStub, useMemo: (fn) => fn(), useRef: hooks.useRef ?? reactStub.useRef },
 		usePrefs,
 		hooks.useState ?? reactStub.useState,
 		hooks.useEffect ?? reactStub.useEffect,
-		(fn) => fn()
+		(fn) => fn(),
+		hooks.createPortal ?? reactDomStub.createPortal,
+		doc,
+		storage,
+		win
 	);
+	return { ...api, storage };
 }
 
 /**
@@ -600,8 +625,8 @@ check("loader entry id = dsh-ui-tools", probe.id === "dsh-ui-tools", String(prob
 check("入口 inject = slots/modelDirectories/sessions/locale/workspaces",
 	JSON.stringify(probe.mod.inject) === JSON.stringify(["slots", "modelDirectories", "sessions", "locale", "workspaces"]),
 	probe.mod.inject.join(", "));
-check("bundle 只 require react（client 模块表铁律）",
-	probe.required.length > 0 && probe.required.every((id) => id === "react"),
+check("bundle 只 require react / react-dom（client 模块表铁律）",
+	probe.required.length > 0 && probe.required.every((id) => id === "react" || id === "react-dom"),
 	probe.required.join(",") || "（无）");
 
 /* ── 场景 0b：机器可读内核约束（v0.4.5） ──
@@ -748,6 +773,8 @@ section("B. 新内核（提供 uiConversation）：六个功能全部生效");
 			["功能三 WSC_CSS", "[data-wsc-chip]"],
 			["功能四 SET_CSS", "[data-set-root]"],
 			["功能五 TSP_CSS", "[data-tsp-pill]"],
+			// v0.4.29：胶囊悬浮窗外壳（position:fixed + 光标）也必须随共享标签注入。
+			["功能五 胶囊 TSP_CSS", "[data-tsp-capsule]"],
 			// 功能七的哨兵必须落在「真正隐藏面板的那条规则」上：只查
 			// `[data-ui-tools-todo-sweep]` 会被 `html[data-ui-tools-todo-sweep]`
 			// 前缀单独命中，于是把 `{display:none !important}` 删掉也能假绿
@@ -755,7 +782,7 @@ section("B. 新内核（提供 uiConversation）：六个功能全部生效");
 			["功能七 TSW_CSS", "[data-testid=\"todo-panel\"]"]
 		];
 		const missing = sentinels.filter(([, needle]) => !css.includes(needle)).map(([label]) => label);
-		check("共享样式标签含全部六份 CSS 哨兵（v0.4.28 起含 TSW_CSS）",
+		check("共享样式标签含全部六份 CSS 哨兵（v0.4.28 起含 TSW_CSS；v0.4.29 起含胶囊外壳）",
 			missing.length === 0, missing.length === 0 ? "六份齐全" : `缺失：${missing.join("、")}`);
 		// 光有目标选择器还不够：必须真的带 display:none !important 才叫「隐藏」。
 		const tswRule = /html\[data-ui-tools-todo-sweep\]\s*\[data-testid="todo-panel"\]\s*\{[^}]*display\s*:\s*none\s*!important[^}]*\}/.test(css);
@@ -872,10 +899,10 @@ section("B2. 功能五：输出速度计（dock 统计行 pill：末回合精确
 	check("偏好新增 tokenSpeedEnabled 且默认开",
 		env.seats.get("settings.section")?.[0]?.def.inject().prefs.getSnapshot().tokenSpeedEnabled === true);
 
-	// ③ 组件层：直接调起 dock pill，钉住 DOM 结构与开关门控（不必依赖真机截图）。
+	// ③ 组件层：直接调起胶囊组件，钉住 DOM 结构、portal 目标、拖动句柄与开关门控。
 	{
 		const t = (key, vars) => {
-			const dict = { "tps.exact": "{tps} tok/s", "tps.estimated": "≈ {tps} tok/s", "tps.liveNote": "生成中估算", "tps.title": "T", "tps.liveTitle": "L", "a11y.exact": "a{tps}", "a11y.estimated": "e{tps}" };
+			const dict = { "tps.exact": "{tps} tok/s", "tps.estimated": "≈ {tps} tok/s", "tps.liveNote": "生成中估算", "tps.dragHint": "拖动", "tps.title": "T", "tps.liveTitle": "L", "a11y.exact": "a{tps}", "a11y.estimated": "e{tps}" };
 			let text = dict[key] ?? key;
 			for (const name of Object.keys(vars ?? {})) text = text.replace(`{${name}}`, String(vars[name]));
 			return text;
@@ -887,21 +914,88 @@ section("B2. 功能五：输出速度计（dock 统计行 pill：末回合精确
 		];
 		const snapshot = { legacy: { nodes, partial: void 0 } };
 		const useTspChat = (sel) => sel(snapshot);
+		// 组件外层是胶囊 div[data-tsp-capsule]（可能被 createPortal 包一层），
+		// 读数在它内部的 span[data-tsp-pill]（children 可能是嵌套数组，递归搜）。
+		const unwrap = (el) => (el && el.type === "@portal" ? el.children[0] : el);
+		const findPill = (el) => {
+			if (el === null || el === void 0 || typeof el !== "object") return null;
+			if (Array.isArray(el)) { for (const child of el) { const hit = findPill(child); if (hit !== null) return hit; } return null; }
+			if (el.props && el.props["data-tsp-pill"] === "") return el;
+			return findPill(el.children);
+		};
 
 		// 精确值路径（无 partial）：120/4 = 30 → 「⚡30 tok/s」。
 		const { TokenSpeedDockPill } = loadTspComponents();
 		const pillEl = TokenSpeedDockPill({ useTspChat, t, prefs: on });
-		check("dock pill：末回合精确值 30 tok/s 渲染文案", flatten(pillEl) === "⚡30 tok/s", flatten(pillEl));
-		check("dock pill：带 data-tsp-pill 与 title/aria（真机选择器与可访问性）",
-			pillEl?.props?.["data-tsp-pill"] === "" && typeof pillEl.props.title === "string" && pillEl.props["aria-label"] === "a30");
-		check("dock pill：开关关闭时渲染 null（不占位）",
-			TokenSpeedDockPill({ useTspChat, t, prefs: off }) === null);
-		check("dock pill：无任何可算数据时渲染 null（不显示假值）",
+		const capsuleEl = unwrap(pillEl);
+		const bodyEl = findPill(pillEl);
+		check("胶囊：末回合精确值 30 tok/s 渲染文案", flatten(pillEl) === "⚡30 tok/s", flatten(pillEl));
+		check("胶囊外壳带 data-tsp-capsule 与 position:fixed + 拖动光标样式标记",
+			capsuleEl?.props?.["data-tsp-capsule"] === "" && capsuleEl?.props?.style?.position === "fixed", JSON.stringify(capsuleEl?.props?.style));
+		check("胶囊：读数子节点带 data-tsp-pill 与 title/aria（真机选择器与可访问性）",
+			bodyEl?.props?.["data-tsp-pill"] === "" && typeof capsuleEl.props.title === "string" && bodyEl.props["aria-label"] === "a30");
+		check("胶囊：注册四个指针/双击拖动句柄（真机可拖动契约）",
+			typeof capsuleEl.props.onPointerDown === "function" && typeof capsuleEl.props.onPointerMove === "function" && typeof capsuleEl.props.onPointerUp === "function" && typeof capsuleEl.props.onDoubleClick === "function");
+		check("胶囊：开关关闭时渲染 null（不占位）", TokenSpeedDockPill({ useTspChat, t, prefs: off }) === null);
+		check("胶囊：无任何可算数据时渲染 null（不显示假值）",
 			TokenSpeedDockPill({ useTspChat: (sel) => sel({ legacy: { nodes: [] } }), t, prefs: on }) === null);
+
+		// portal 契约：有 document.body 时用 createPortal 挂到 body（脱离统计行/祖先裁剪）。
+		{
+			const fakeDoc = { body: { tag: "body" } };
+			const { TokenSpeedDockPill: Pill2 } = loadTspComponents({ document: fakeDoc });
+			const portEl = Pill2({ useTspChat, t, prefs: on });
+			check("胶囊：有 document.body 时经 createPortal 挂到 body（可拖浮窗，脱离统计行）",
+				portEl?.type === "@portal" && portEl?.props?.container === fakeDoc.body, String(portEl?.type));
+		}
+
+		// 拖动 + 位置持久化：模拟 down→move→up，坐标必须落进 localStorage（同一个键）。
+		{
+			const api = loadTspComponents();
+			const dragEl = api.TokenSpeedDockPill({ useTspChat, t, prefs: on });
+			const cap = unwrap(dragEl);
+			const target = { getBoundingClientRect: () => ({ left: 10, top: 20 }), setPointerCapture: () => {} };
+			cap.props.onPointerDown({ clientX: 110, clientY: 120, pointerId: 1, currentTarget: target, preventDefault: () => {} });
+			cap.props.onPointerMove({ clientX: 210, clientY: 220 });
+			cap.props.onPointerUp({});
+			const saved = api.tspReadPos();
+			check("胶囊：拖动后坐标写入 localStorage 并能读回（位置持久化）",
+				saved !== null && saved.x === 110 && saved.y === 120, JSON.stringify(saved));
+		}
+
+		// 位置工具的纯函数契约：夹取 / 默认位 / 坏数据回退。
+		{
+			const geo = loadTspComponents({ window: { innerWidth: 1000, innerHeight: 800 } });
+			check("tspClampPos：拖出视口时夹回可视区（留边距）",
+				JSON.stringify(geo.tspClampPos({ x: 5000, y: 5000 })) === JSON.stringify({ x: 900, y: 760 }),
+				JSON.stringify(geo.tspClampPos({ x: 5000, y: 5000 })));
+			check("tspClampPos：负坐标夹到边距", JSON.stringify(geo.tspClampPos({ x: -50, y: -50 })) === JSON.stringify({ x: 4, y: 4 }),
+				JSON.stringify(geo.tspClampPos({ x: -50, y: -50 })));
+			check("tspDefaultPos：有视口时落在右下角偏内", JSON.stringify(geo.tspDefaultPos()) === JSON.stringify({ x: 888, y: 668 }),
+				JSON.stringify(geo.tspDefaultPos()));
+			// 坏数据（非 JSON / 缺字段）→ null，绝不抛。
+			const badStore = makeFakeLocalStorage();
+			badStore.setItem("dsh-ui-tools:token-speed:pos:v1", "{not json");
+			const badApi = loadTspComponents({ localStorage: badStore });
+			const missStore = makeFakeLocalStorage();
+			missStore.setItem("dsh-ui-tools:token-speed:pos:v1", JSON.stringify({ x: "left" }));
+			const missApi = loadTspComponents({ localStorage: missStore });
+			check("tspReadPos：坏数据/缺字段安静返回 null（不抛）",
+				badApi.tspReadPos() === null && missApi.tspReadPos() === null,
+				`${JSON.stringify(badApi.tspReadPos())} / ${JSON.stringify(missApi.tspReadPos())}`);
+			// 正常往返：写→读一致。
+			const rt = loadTspComponents();
+			rt.tspWritePos({ x: 321, y: 654 });
+			const round = rt.tspReadPos();
+			rt.tspClearPos();
+			check("tspWritePos/tspReadPos/tspClearPos：写入→读回→清除的往返一致",
+				round !== null && round.x === 321 && round.y === 654 && rt.tspReadPos() === null,
+				JSON.stringify(round));
+		}
 
 		// 真机形态（v0.4.26 bug 回归钉）：settled 节点 firstTokenTime=null、只有
 		// stepStartTime/completedTime —— 必须回退墙钟口径仍然渲染，否则真机上
-		// 每回合结束后 pill 都会消失（生成中能看到、一结束就没了）。
+		// 每回合结束后胶囊都会消失（生成中能看到、一结束就没了）。
 		const restoredNodes = [
 			{ kind: "assistant", turn: 1, messageId: "r1", timing: { stepStartTime: 0, firstTokenTime: null, completedTime: 4000 }, usage: { outputTokens: 120 } }
 		];
@@ -910,7 +1004,7 @@ section("B2. 功能五：输出速度计（dock 统计行 pill：末回合精确
 			t,
 			prefs: on
 		});
-		check("dock pill：firstTokenTime=null 的已固化回合仍显示精确值（墙钟回退，真机回归钉）",
+		check("胶囊：firstTokenTime=null 的已固化回合仍显示精确值（墙钟回退，真机回归钉）",
 			flatten(restoredEl) === "⚡30 tok/s", String(flatten(restoredEl)));
 
 		// 标准 props 路径（真机唯一可靠来源）：dock 是 session 作用域槽，内核通过
@@ -919,9 +1013,9 @@ section("B2. 功能五：输出速度计（dock 统计行 pill：末回合精确
 		// undefined → 空快照 → 永不渲染；这里钉住「只给 useChat 也能算出来」。
 		const useChatStd = (sel) => sel(snapshot);
 		const stdEl = TokenSpeedDockPill({ useChat: useChatStd, t, prefs: on });
-		check("dock pill：走内核标准 props useChat 即可算出末回合速度（真机路径）",
+		check("胶囊：走内核标准 props useChat 即可算出末回合速度（真机路径）",
 			flatten(stdEl) === "⚡30 tok/s", flatten(stdEl));
-		check("dock pill：useChat 与 useTspChat 同时存在时优先用标准 useChat",
+		check("胶囊：useChat 与 useTspChat 同时存在时优先用标准 useChat",
 			TokenSpeedDockPill({
 				useChat: (sel) => sel({ legacy: { nodes: [] } }),
 				useTspChat: useTspChat,
@@ -929,25 +1023,31 @@ section("B2. 功能五：输出速度计（dock 统计行 pill：末回合精确
 				prefs: on
 			}) === null);
 
-		// 生成中估算路径：用可控 useRef + 受控时钟，模拟两帧流式增量。
+		// 生成中估算路径：用「按调用序号复用的 useRef 池」+ 受控时钟，模拟两帧流式增量。
+		// （组件有 3 个 useRef：est/posRef/drag，必须每次渲染各自独立、跨渲染按槽位复用，
+		//  否则 est 累积器会被 posRef/drag 串味。渲染前重置 refIdx 即可按槽位复用。）
 		let clock = 0;
 		const realNow = performance.now;
 		performance.now = () => clock;
-		const sharedRef = { current: null };
-		const { TokenSpeedDockPill: DynPill } = loadTspComponents({ useRef: () => sharedRef });
+		const refPool = [];
+		let refIdx = 0;
+		const useRefPool = (init) => { const i = refIdx; refIdx += 1; if (refPool[i] === void 0) refPool[i] = { current: init }; return refPool[i]; };
+		const { TokenSpeedDockPill: DynPill } = loadTspComponents({ useRef: useRefPool });
 		const partialState = { legacy: { nodes: [], partial: { turn: 1, step: 0, blocks: [{ kind: "text", text: "abcdabcd" }] } } };
 		const useDyn = (sel) => sel(partialState);
 		// 帧 1：建累积器（estTokens=0，尚不足以下结论）→ null。
+		refIdx = 0;
 		const frame1 = DynPill({ useTspChat: useDyn, t, prefs: on });
 		// 帧 2：blocks 引用变化（新增量），时钟前进 1500ms（按 GAP_CAP 截断为 1000ms）。
 		clock = 1500;
 		partialState.legacy.partial = { turn: 1, step: 0, blocks: [{ kind: "text", text: "abcdabcdabcdabcdabcdabcdabcdabcdabcdabcd" }] };
+		refIdx = 0;
 		const frame2 = DynPill({ useTspChat: useDyn, t, prefs: on });
 		performance.now = realNow;
-		check("dock pill：生成中按 blocks 折算并标注估算口径（≈ + 生成中估算）",
+		check("胶囊：生成中按 blocks 折算并标注估算口径（≈ + 生成中估算）",
 			flatten(frame2).includes("≈ ") && flatten(frame2).includes("生成中估算"), `${flatten(frame1)} → ${flatten(frame2)}`);
-		check("dock pill：生成中 pill 带 data-tsp-pill 且 role=status（无障碍播报）",
-			frame2?.props?.["data-tsp-pill"] === "" && frame2?.props?.role === "status");
+		check("胶囊：生成中读数带 data-tsp-pill 且 role=status（无障碍播报）",
+			findPill(frame2)?.props?.["data-tsp-pill"] === "" && findPill(frame2)?.props?.role === "status");
 	}
 
 	await env.entryFiber.dispose();

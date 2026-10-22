@@ -1329,11 +1329,14 @@ section("10. 与参考插件共存：不 import / 不 require 对方任何代码
 	if (!/dsh:session-context-menu/.test(code)) ok("不依赖参考插件的自定义事件");
 	else bad("不依赖参考插件的自定义事件");
 
-	// 不新增 require（R1：只准 require("react")）
+	// 不新增 require（R1：只准 require("react")；v0.4.29 起功能五胶囊浮窗
+	// 额外允许 require("react-dom")（createPortal）——本机已装插件普遍这么用，
+	// 且它在 DSH client 模块表内。除此之外仍一律禁止。）
+	const ALLOWED_REQUIRES = new Set(["react", "react-dom"]);
 	const requires = [...code.matchAll(/require\(\s*["']([^"']+)["']\s*\)/g)].map((m) => m[1]);
-	const notReact = requires.filter((name) => name !== "react");
-	if (notReact.length === 0) ok(`bundle 只 require react（实际 require：${requires.join(", ") || "无"}）`);
-	else bad("bundle 只 require react", notReact.join(", "));
+	const notReact = requires.filter((name) => !ALLOWED_REQUIRES.has(name));
+	if (notReact.length === 0) ok(`bundle 只 require react / react-dom（实际 require：${requires.join(", ") || "无"}）`);
+	else bad("bundle 只 require react / react-dom", notReact.join(", "));
 
 	// 无 MutationObserver / 无轮询（R2）
 	if (!/MutationObserver/.test(code)) ok("无 MutationObserver（R2：不搬动 slot 节点）");
