@@ -393,12 +393,26 @@ try {
 				const fire = () => capsule.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, clientX: x, clientY: y, pointerId: 1 }));
 				fire();
 				fire();
-				return { ok: true, stored: localStorage.getItem("dsh-ui-tools:token-speed:pos:v1"), left: capsule.style.left, top: capsule.style.top };
+				return { ok: true };
 			});
-			console.log(`     双击复位后：${JSON.stringify(resetInfo)}`);
-			check("双击（两次 pointerdown）复位胶囊并清掉持久化位置",
-				resetInfo.ok === true && resetInfo.stored === null,
-				JSON.stringify(resetInfo));
+			// React 的 setState 是异步的：上面两次 pointerdown 只是把复位排进更新队列，
+			// 必须等一帧渲染后再读 DOM，否则读到的是复位前的旧坐标（日志会误显示“没复位”）。
+			await new Promise((r) => setTimeout(r, 450));
+			const resetAfter = await page.evaluate(() => {
+				const pill = document.querySelector("[data-tsp-pill]");
+				const capsule = pill ? pill.closest("[data-tsp-capsule]") : null;
+				return {
+					stored: localStorage.getItem("dsh-ui-tools:token-speed:pos:v1"),
+					left: capsule ? capsule.style.left : null,
+					top: capsule ? capsule.style.top : null,
+				};
+			});
+			const resetOk = resetInfo.ok === true && resetAfter.stored === null
+				&& resetAfter.left === cap.left && resetAfter.top === cap.top;
+			console.log(`     双击复位后：${JSON.stringify(resetAfter)}`);
+			check("双击（两次 pointerdown）复位到默认位并清掉持久化位置",
+				resetOk,
+				JSON.stringify({ default: { left: cap.left, top: cap.top }, after: resetAfter }));
 			await new Promise((r) => setTimeout(r, 250));
 		}
 
