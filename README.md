@@ -65,7 +65,7 @@ DSH Web 插件：七个 UI 工具合并成一个包，只动对应控件，不�
 
 > **v0.4.25 迁移说明**：此前（v0.4.6–v0.4.24）精确 pill 挂在 `conversation.chat.assistant-actions`（`order: -10`，紧贴「用时」左侧），生成中估算条走 Definition 通道自建 `token-speed-live` chat 节点 + `conversation.chat.node` 渲染器。后者因内核「已物化节点被撤回即抛错、整条 chat 快照链停更」（v0.4.7 事故）而成为长期风险面，且 Definition 节点不进 `legacy` 快照、dock 组件本就读不到。v0.4.25 把两处**合并为 dock 里的单条 pill**：删除 Definition 通道、`conversation.chat.node` 渲染器与旧 `assistant-actions` 注册，生成中改由 `legacy.partial` 折算 —— 风险面归零、位置也正落在用户要的「几轮几步旁边」。compat-check 相应新增「源码不得再出现 `tspLiveDefinition` / `token-speed-live` / `tspChunkEffort` / `data-tsp-live`」四条反向钉。
 
-**开关**：设置页「在输入框下方「几轮几步」旁显示输出速度计（tok/s）」，默认开；偏好字段 `tokenSpeedEnabled`（同一个 localStorage key）。旧内核上该开关灰显。
+**开关**：设置页「显示输出速度计（tok/s）——可拖动的胶囊悬浮窗，双击复位」，默认开；偏好字段 `tokenSpeedEnabled`（同一个 localStorage key）。旧内核上该开关灰显。
 
 > **历史回合的读数口径（v0.4.27 修正）**：早期版本认为「`firstTokenTime` 不进持久化日志、重载后历史回合没有读数」。真机实测否定了这一假设：`legacy` 快照里的 `firstTokenTime` **在真机上恒为 `null`**（与是否重载无关），所以只靠解码口径会让**每个回合结算后**都失去读数（生成中能看到、一结束就消失）。v0.4.27 起改为「解码优先、墙钟回退」两级口径：历史回合显示的是**整步墙钟速度**（含首字延迟，通常略低于纯解码速度），而不是不显示。
 
@@ -365,6 +365,8 @@ node tools/live-smoke.mjs <URL+token>   # 真机冒烟（可选；自动探测�
   - **断言**：compat-check B2 新增「portal 到 body」「fixed 浮层」「四个拖动句柄」「拖动写 localStorage」「`tspClampPos` 夹取 / `tspDefaultPos` 默认位 / `tspReadPos` 坏数据回退 / 写读清往返」断言；require 桩放行 `"react-dom"`、`makeFakeDom` 补 `body`、`loadTspComponents` 注入 `createPortal`/`useState`/`useEffect`/`useCallback`/`window`/`localStorage`；样式哨兵加 `[data-tsp-capsule]`。**compat-check 104 → 113/113**；hook 钉 7/7、座位钉 38/38、右键钉 228/228、漂移钉 3/3、live-smoke SKIP（无 URL）。
   - **live-smoke 2c 重写**：从「与统计行同行、排 activity 右侧」改为「`[data-tsp-capsule]` 是 `position:fixed` 浮层、不在 `[data-composer-dock]` 内、挂在 `document.body`、带 `cursor: grab/move`」+ **真实鼠标拖拽**（`page.mouse` down/move/up）后坐标变化且写入 localStorage，再双击复位；文件头功能条目与 `MARKERS.tokenSpeedPill` 注释同步。
   - **文档与版本**：`package.json` `0.4.28 → 0.4.29`、`description` 追加本条；README 功能五整节改写为「可拖动胶囊」并加 v0.4.29 迁移说明、布局偏好行与验证口径（113/113）同步；AGENT.md 功能表第 5 行、§3 新增「改胶囊悬浮窗的拖动 / 位置」行、§6.1 标题与前言、§7 口径、§4/§8 基线数字（113/113）同步。
+  - **后续两处修正（同一版本内）**：① **双击复位曾失效** —— `pointerdown` 里 `preventDefault()` 会抑制浏览器原生 `dblclick`，真机实测只有 `pointerdown/click` 而没有 `dblclick`，改为在 `pointerdown` 处理器内**自行判定两次按下间隔 < 350ms** 即复位（不再依赖 `onDoubleClick`）；② **live-smoke 双击断言假红** —— 复位后立即读 DOM 读到的是 React 异步渲染前的旧坐标，改为等 450ms 再断言「位置回到默认位 + localStorage 键已清」。真机复验：拖动 → `{"x":668,"y":312}` 落盘、刷新后保持、双击回默认位并清键（RESET_OK）。
+  - **设置页开关文案同步**：v0.4.29 起不再「在输入框下方…旁」，改为「显示输出速度计（tok/s）——可拖动的胶囊悬浮窗，双击复位」。
 
 - **v0.4.28**：新增**功能七「待办清扫」**——修「会话结束后输入框上方的『任务』待办面板带着转圈圆点永驻」。
   - **现象**：回合都结束了，官方 TodoPanel 还在转圈，直到同会话发出下一条消息才消失；
