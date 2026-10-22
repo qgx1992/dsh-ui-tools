@@ -255,30 +255,42 @@ ctx.inject(["sessions", "workspaces"], (scope) => {
 
 **开关**：设置页「会话 / 工作区列表右键菜单」，默认开；偏好字段 `ctxMenuEnabled`。**关掉时一根监听都不挂**，浏览器原生右键菜单原样保留；门控显式订阅偏好仓库，因此**改开关即时生效、无需刷新页面**，卸载时订阅与监听一并清理。
 
-## 功能七：待办清扫（v0.4.28 新增）
+## 功能七：待办进度面板（v0.4.30 重构，取代 v0.4.28 的「待办清扫」）
 
-会话回合结束后，输入框上方的官方待办面板（「任务」列表）若最后一份快照里还有 `in_progress` / `pending` 条目，会带着 1.5s 转圈圆点**永久挂着**，直到同会话发出下一条消息才消失。
+v0.4.28 的初版把功能七做成了「回合结束后隐藏仍在转圈的待办面板」。用户实测后指出理解错了：
+**真正的问题是「待办列表不按进度更新状态」**——模型写完一次 `todo_write` 之后就不再维护，列表永远停在
+「进行中」；同时官方面板**折叠时只显示一行汇总**，不展开就看不到每项的状态。v0.4.30 按这两条重做。
 
-**这是内核的设计缺口，不是模型的错**：`todos` 投影的 host 端 reducer 只处理两个事件——`todo/write` 覆盖、`turn/start` 清空；**回合结束 / 停止 / 出错都不对账**。模型最后一轮留下未完成项直接收尾时，面板渲染的就是这份冻结快照；条目圆点 `StateDot` 只看 `status` 字符串，`in_progress` 恒为 ongoing 转圈。插件改不了 reducer，只能做**展示层对账**。
+**根因**：`todos` 投影的 host 端 reducer 只处理两个事件——`todo/write` 覆盖、`turn/start` 清空；
+**回合结束 / 停止 / 出错都不对账**，模型不重写就冻结在最后一份快照。而官方 `TodoPanel` 里
+`!collapsed && <ul>` —— 折叠时每项状态点根本不进 DOM。插件改不了 reducer（`todo_write` 在 tool / host 侧，
+client 侧无写入通道），只能做**展示层推断 + 恒展开渲染**。
 
 ### 做法
 
-在同一个 `conversation.input.dock` 槽位挂一个**恒渲染 null 的对账哨兵**（`id="ui-tools-todo-sweeper"`，`order` 30，排在官方 todo 0 / queue 20 之后）：
+在同一个 `conversation.input.dock` 槽位挂一个**镜像进度面板** `TodoProgressDock`（`id="ui-tools-todo-progress"`，
+`order` 30，不同 id 不替换官方 `todo` 的 `order:0`）：
 
-1. 组件从内核渲染 dock 时传入的 `zone.session` 快照读 `running`（与官方 `TodoDock` 同源；另留标准 kit 的 `useProjection("todos")` 读待办清单）；
-2. **确知会话已收尾**（`session.running === false`）且待办仍有未完成项时，给 `<html>` 打 `data-ui-tools-todo-sweep="on"` 属性；
-3. 共享样式标签新增 `TSW_CSS`：`html[data-ui-tools-todo-sweep] [data-testid="todo-panel"]{display:none !important}` —— renderer 给槽位套的 `div[data-slot]` 是 `display:contents` 不参与布局，直接隐藏面板本体即可干净塌缩；
-4. 新一轮开始（`running === true`）或待办清空（面板本就渲染 null）后摘除属性，面板恢复；
-5. 组件卸载（切会话/关页面）时 `useEffect` cleanup 摘掉属性，不留全局状态。
+1. 组件从标准 props 读 `useProjection("todos")`（待办清单）与 `useProjection("sessionStats").steps`（助手步数）；
+2. 用 `tswSignature` 认出「同一份列表」，记下它首次出现时的步数基线，之后按
+   `tswAdvanceFromSteps(stepsSince, TSW_STEPS_PER_ITEM=2)` **每 2 步推进一项**（回合收尾至少 +1）；
+3. `tswDeriveStatuses(todos, advance, running)` 把推断结果叠加到内核状态上，三条硬约束：
+   **内核已判 `completed` 的项绝不降级**、**运行中不把最后一项也判完成**、**空闲时不新造 `in_progress`**；
+4. 面板**始终展开**，每项渲染 `[data-status]` + 状态点 + 文案，折叠态看不到的问题从根上消失；
+   头部给「N 已完成 · N 进行中 · N 待处理」汇总，推断生效时带「按步数推断」小徽标；
+5. 渲染时给 `<html>` 打 `data-ui-tools-todo-mirror="on"`，共享样式标签的 `TSW_CSS` 单条规则
+   `html[data-ui-tools-todo-mirror] [data-testid="todo-panel"]{display:none !important}` 隐藏官方本体，避免双层；
+6. 卸载 / 关开关时 `useEffect` cleanup 摘掉属性，官方待办面板原样恢复。
 
 ### 设计取舍
 
-- **fail-open**：`session` 快照缺席或形态未知（旧内核没传 `zone`、测试桩少参）时**一律不动手** —— 宁可少藏，也不能在会话可能正在跑时把面板盖掉；
-- **不搬 DOM、无 MutationObserver、无轮询定时器**（R2 铁律）：唯一的副作用就是一个 `<html>` 属性 + 一条 CSS 规则；
-- **不进 alphaFeatures 子 fiber**：哨兵只依赖 dock 槽渲染时的 `zone`/标准 kit，不碰 `uiConversation`/`uiSession` target 体系，新旧内核同一条注册路径；
-- **不用 `:has()` / 内核哈希类名**：选择器只含 `[data-testid="todo-panel"]`（官方自家测试锚点）与自有属性，内核升级不失效。
+- **只做展示层**：不写回任何投影、不拦内核请求、不轮询清理；推断只影响这一份镜像的渲染；
+- **fail-open**：`useProjection` 缺席或 `todos` 非数组时**不渲染镜像、不打属性**（官方面板照常）；
+- **不搬 DOM、无 MutationObserver、无轮询定时器**（R2 铁律）：副作用只有 `<html>` 属性 + 一条 CSS 规则；
+- **不用 `:has()` / 内核哈希类名**：选择器只含 `[data-testid="todo-panel"]`（官方自家测试锚点）与自有属性。
 
-**开关**：设置页「会话待办 → 回合结束后隐藏仍在转圈的『任务』待办面板」，默认开；偏好字段 `todoSweepEnabled`。断言：`compat-check` 场景 B4（注册位/默认值/纯函数口径/副作用矩阵/fail-open/卸载清理/反向钉）。
+**开关**：设置页「会话待办 → 显示待办进度面板（始终展开每一项，按进度推进状态）」，默认开；偏好字段 `todoSweepEnabled`。
+断言：`compat-check` 场景 B4（注册位/默认值/推断口径/不降级/副作用矩阵/fail-open/卸载清理/反向钉）+ `live-smoke` 2d（CSS 契约与属性自洽）。
 
 ## 实现原理
 
@@ -290,7 +302,7 @@ ctx.inject(["sessions", "workspaces"], (scope) => {
 
 - 工作区徽章注册进 `conversation.session.header.actions`（见功能三）。
 - 设置页注册进 `settings.section`（见功能四）；所有偏好走 apply 期创建的一次性 localStorage 偏好仓库，组件经 `useSyncExternalStore` 订阅。
-- 待办清扫哨兵注册进 `conversation.input.dock`（见功能七）：恒 null 组件 + `<html>` 属性 + `TSW_CSS`，无 Observer、无定时器。
+- 待办进度面板注册进 `conversation.input.dock`（见功能七）：镜像面板（每项状态始终可见 + 按步数推断推进）+ `<html>` 属性 + `TSW_CSS` 隐藏官方本体，无 Observer、无定时器。
 
 七个功能各自独立命名空间（locale / slot id / data-* 前缀），互不干扰。
 
@@ -300,7 +312,7 @@ ctx.inject(["sessions", "workspaces"], (scope) => {
 
 | DSH 内核 | 入口 fiber | `alphaFeatures` 子 fiber | boot 审计 | 横幅 | 可用功能 |
 |---|---|---|---|---|---|
-| `0.1.2-alpha.1` 及更新¹ | active | active | pass | 无 | 全部 7 项（含功能六纯 DOM、功能七待办清扫） |
+| `0.1.2-alpha.1` 及更新¹ | active | active | pass | 无 | 全部 7 项（含功能六纯 DOM、功能七待办进度面板） |
 | `0.1.1-rc.1` / `0.1.1-rc.2` | active | pending（静默） | pass | 无 | 1 / 2 / 3 / 4 / 6 / 7（功能五缺席，设置页速度计开关灰显） |
 
 > ¹ 「更新」指 **同属 0.1.2-alpha.1 之后的发布线**（`0.1.2-alpha.1` / `0.1.2-*` / `0.1.3-*` / `0.1.5-*` / `0.1.6-*` 及更高）。DSH 的预发布版按 semver 只与**同一 `x.y.z` 元组**比较，所以字面区间 `>=0.1.2-alpha.1` 在真实 semver 下**并不匹配** `0.1.5-rc.2`——本包因此按发布线逐条声明，而不是写一个连续区间，详见下节。
@@ -321,7 +333,7 @@ ctx.inject(["sessions", "workspaces"], (scope) => {
 - 该区间已对 npm 上全部 **29 个**已发布内核版本 + 3 个未来哨兵逐项断言，并保证普通 semver 语义与市场侧 `includePrerelease` 语义**判决一致**（见下「自检」）。
 - **v0.4.8 修正**：此前区间写作 `… || >=0.1.6-0`，其末项在**普通语义**下**不覆盖**任何 `0.1.7-*` / `0.2.0-*` 预发布版（只在 `includePrerelease` 下才成立），实测有 **6 条分流**（`0.1.7-alpha.1/2`、`0.1.7-rc.1/2`、`0.2.0-rc.1/2`）。原因同上一节：预发布版只与同 `x.y.z` 的元组比较，而 `>=0.1.6-0` 的下界落在 0.1.6 线。更隐蔽的是——当时 0b 的版本表**只列了 21 个**，恰好漏掉整条 0.1.7/0.2.0 线，于是「两种语义判决一致」那条断言**假绿**。现改为逐条发布线 `^0.1.6-0 || ^0.1.7-0 || ^0.2.0-0 || >=0.3.0-0` 并**全量列表**，令同类裂缝无处可藏。
 
-> **验证口径**：`node tools/compat-check.mjs` 跑在本机已装内核副本的**真实 cordis** 上（v0.4.29 实测 **113/113** 全绿；断言计数随内核枚举动态变化，门槛是**零 FAIL** 而非某个具体数字，因此别把它当固定指标读。另注意它需要 `DSH_CORDIS_ENTRY` / `DSH_SEMVER_ENTRY` 指向可用的 cordis 与 semver——本机可指向仓库内 `.scratch/kernel/...`），场景断言七个功能的槽位注册、子 fiber 状态与 boot 审计口径；B3 自 v0.4.25 起改为「Definition 通道已移除」的源码反向钉（不再逐内核驱动装配器）；B4 自 v0.4.28 起覆盖功能七待办清扫（注册位/纯函数/副作用矩阵/fail-open）。真机（浏览器）行为另由 `tools/live-smoke.mjs` 覆盖（含 2c 功能五胶囊浮窗契约与 2d 功能七待办清扫 CSS 契约），需自备 URL+token。
+> **验证口径**：`node tools/compat-check.mjs` 跑在本机已装内核副本的**真实 cordis** 上（v0.4.30 实测 **126/126** 全绿；断言计数随内核枚举动态变化，门槛是**零 FAIL** 而非某个具体数字，因此别把它当固定指标读。另注意它需要 `DSH_CORDIS_ENTRY` / `DSH_SEMVER_ENTRY` 指向可用的 cordis 与 semver——本机可指向仓库内 `.scratch/kernel/...`），场景断言七个功能的槽位注册、子 fiber 状态与 boot 审计口径；B3 自 v0.4.25 起改为「Definition 通道已移除」的源码反向钉（不再逐内核驱动装配器）；B4 自 v0.4.30 起覆盖功能七待办进度面板（注册位/纯函数推断口径/不降级/副作用矩阵/fail-open）。真机（浏览器）行为另由 `tools/live-smoke.mjs` 覆盖（含 2c 功能五胶囊浮窗契约与 2d 功能七待办进度面板 CSS 契约），需自备 URL+token。
 
 > **profile 安装漂移**：`tools/check-profile-drift.mjs` 会比对 `~/.dsh/profiles/*/` 三处口径——`package.json` 的声明、`pnpm-lock.yaml` 的 specifier 与 resolved 版本、`node_modules` 里实际安装的版本。三者不一致时必须先修 profile，否则「改了代码、刷新页面、毫无变化」——因为真实 GUI 跑的是 profile 里的安装副本，而 `compat-check.mjs` 读的**永远是仓库 `lib/client.js`**，两者是两份文件。
 
@@ -348,7 +360,7 @@ node tools/live-smoke.mjs <URL+token>   # 真机冒烟（可选；自动探测�
 
 `tools/check-model-seat-hug.mjs` 专治一类**静态阅读看不出来**的样式 bug：它把手写 DOM 骨架建成内核 `InputBar` 右侧动作区的真实层次（座位在 `div.standardControls` 内、听写按钮嵌在兄弟容器 `div.activity` 的 `span.triggerAnchor` 里），**求值** `MSS_CSS` 模板串（而不是只读源码文本）后用自写选择器匹配器逐条核对：座位父容器被推到最右、横缝收到 0、中英两套 `aria-label` 都命中、无座位/听写缺席时不误伤、CSS 里不出现内核哈希类名、官方模型按钮仍被隐藏。它也守住「模板串被反引号提前闭合」这类事故——那种情况下求值会失败或留下未展开的 `${...}`。本仓库零依赖，不引入 jsdom。
 
-`tools/compat-check.mjs` 不开浏览器也不重启服务：它从本机已装内核副本里加载 cordis，搭一个最小宿主把 `lib/client.js` 的 entry 挂上去，在「旧内核 / 新内核 / 服务后到 / 内核不提供 remote」四种主场景（外加声明层 0/0b、速度计 B2、待办清扫 B4、Definition 通道已移除的反向钉 B3）下复刻 boot 的审计口径（只看 loader entry fiber 是否停在 PENDING），断言入口激活、子 fiber 状态、各槽位注册、功能一目录冷解析、设置页能力位（含三条「`conversation.view` / `uiSession.provide` / `workspaces.openPath` 永不被调用」的逆向钉），以及**功能五的数值口径（`tspTurnSpeed`/`tspFoldTurn`/`tspLastTurnSpeed`/`tspBlocksEffort`）与 dock 组件的 DOM/开关门控**（后两项直接截取 bundle 源码段执行，测的就是被测 bundle）。
+`tools/compat-check.mjs` 不开浏览器也不重启服务：它从本机已装内核副本里加载 cordis，搭一个最小宿主把 `lib/client.js` 的 entry 挂上去，在「旧内核 / 新内核 / 服务后到 / 内核不提供 remote」四种主场景（外加声明层 0/0b、速度计 B2、待办进度面板 B4、Definition 通道已移除的反向钉 B3）下复刻 boot 的审计口径（只看 loader entry fiber 是否停在 PENDING），断言入口激活、子 fiber 状态、各槽位注册、功能一目录冷解析、设置页能力位（含三条「`conversation.view` / `uiSession.provide` / `workspaces.openPath` 永不被调用」的逆向钉），以及**功能五的数值口径（`tspTurnSpeed`/`tspFoldTurn`/`tspLastTurnSpeed`/`tspBlocksEffort`）与 dock 组件的 DOM/开关门控**（后两项直接截取 bundle 源码段执行，测的就是被测 bundle）。
 
 另含**声明层断言**（场景 0b）：用内核自带的真实 `semver` 校验 `engines.dsh` 覆盖全部已发布内核版本、不误伤未来内核，并保证普通语义与市场侧 `includePrerelease` 语义判决一致——手搓匹配器会把「被测语义」偷换成「我以为的语义」，故不用。可用 `DSH_SEMVER_ENTRY=<...>/semver/index.js` 指定匹配器。
 
@@ -356,7 +368,16 @@ node tools/live-smoke.mjs <URL+token>   # 真机冒烟（可选；自动探测�
 
 ## 变更记录
 
-- **v0.4.29（本次）**：把**功能五「输出速度计 tok/s」改成可随意拖动的胶囊悬浮窗**。
+- **v0.4.30（本次）**：**重构功能七**——用户指出 v0.4.28 理解错了需求。
+  - **用户原话**：「功能七你是不是理解错了，我是想解决待办列表不按进度更新状态的问题，不是消不消失的问题」；随后在选项里明确了两个痛点：①「模型写完一次待办就不再更新，列表停在进行中」；②「折叠时不显示每项状态，希望不展开也能看到进度」。
+  - **形态变化**：v0.4.28 是「回合结束后隐藏仍在转圈的待办面板」的**恒 null 哨兵**；v0.4.30 换成 `conversation.input.dock`（`id="ui-tools-todo-progress"`，`order: 30`）的**镜像进度面板** `TodoProgressDock` —— 自己渲染一份「每项状态点始终可见、永不折叠」的面板，同时用 `<html>` 属性 `data-ui-tools-todo-mirror` + `TSW_CSS` 单条规则隐藏官方本体，避免双层。
+  - **按进度推进（展示层推断）**：读 `useProjection("todos")` 与 `useProjection("sessionStats").steps`；`tswSignature` 认列表身份并记下首现时的步数基线，`tswAdvanceFromSteps(stepsSince, TSW_STEPS_PER_ITEM=2)` 每 2 步推进一项（回合收尾至少 +1），`tswDeriveStatuses(todos, advance, running)` 叠加推断状态。三条硬约束：**内核已判 `completed` 的绝不降级**、**运行中不把最后一项判完成**、**空闲不新造 `in_progress`**。
+  - **为什么只能做展示层**：`todos` 投影唯一写入源是 host 侧的 `todo/write` 事件（`@deepseek-ai/dsh-tool-todo`），client 侧没有 reducer 可挂、也不许拦请求；因此推断只影响这一份镜像的渲染，**不写回任何投影**。
+  - **实测澄清**：真机逐帧探针证实「展开后单项状态不刷新」其实是**折叠只显示汇总 + 模型不重写**，不是渲染 bug——模型真按步 `todo_write` 时 DOM 每项 `data-status` 与 glyph 确实实时更新。
+  - **断言**：compat-check B4 重写（注册位/order、`todoSweepEnabled` 默认开、`tswAdvanceFromSteps` 口径、`tswDeriveStatuses` 不降级/运行中/空闲三态、fail-open、cleanup 摘属性、样式哨兵 `[data-todo-mirror]`），**113 → 126/126**；`live-smoke` 2d 改为「镜像面板 CSS 契约 + 属性与可见性双向翻转」。
+  - **文档与版本**：`package.json` `0.4.29 → 0.4.30`、`description` 追加本条；README 功能七整节重写、验证口径（126/126）与兼容矩阵同步；AGENT.md §0 定位块、§2 功能表第 7 行、§3「改待办进度面板」行、§6.3 整节重写、§7/§8 口径同步。
+
+- **v0.4.29**：把**功能五「输出速度计 tok/s」改成可随意拖动的胶囊悬浮窗**。
   - **用户要求（原文）**：「我想把功能5作为胶囊悬浮窗的，可以随意拖动位置，再验证一下功能7是否生效」。
   - **形态变化**：v0.4.25–v0.4.28 是「输入框下方统计行里、与官方 activity / usage 同行的固定 pill」，位置由内核布局决定、用户改不了；v0.4.29 起改成 `position:fixed` 的**可拖动胶囊**，用 `require("react-dom").createPortal` 挂到 `document.body`（脱离 slot 祖先链的 `overflow:hidden` / `transform` 裁剪），默认落在右下角偏内。
   - **保留 `conversation.composer.dock` 注册**：它是拿到 session 作用域标准 props（`useChat`）的唯一可靠通道（v0.4.25/v0.4.26 两次真机坑的教训），组件仍从这里取 chat 快照（`legacy.nodes` 精确值 / `legacy.partial` 生成中估算），只是**渲染目标从 slot 内改成 body 浮层**。

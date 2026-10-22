@@ -284,12 +284,16 @@ function loadTspComponents(hooks = {}) {
 }
 
 /**
- * 从 bundle 源码截取功能七的取数段（tswHasUnfinished + TodoSweeper），直接编译调用。
+ * 从 bundle 源码截取功能七的取数段（纯函数 + TodoProgressDock），直接编译调用。
  * reactStub 的 useEffect 是 noop，测不了副作用，这里默认换成「立即执行 + 收集
  * 清理函数」的可控替身；document 默认 undefined（SSR 形态，effect 内的
  * typeof 守卫会直接跳过）。
+ *
+ * useRef 默认给**每组件实例一份新对象**（模拟 React 真实语义）：否则跨多次
+ * 直接调用会共享同一个 ref 对象，第二次调用就会带着上一次的进度基线，
+ * 断言「首帧」行为时全部失真。
  * @param {{ useEffect?: Function, document?: object }} hooks
- * @returns {{ cleanups: Function[], tswHasUnfinished: Function, TodoSweeper: Function }}
+ * @returns 取数段导出的纯函数与组件 + cleanups + 最近一次组件实例的 hooks
  */
 function loadTswComponent(hooks = {}) {
 	const src = fs.readFileSync(BUNDLE, "utf8");
@@ -300,13 +304,30 @@ function loadTswComponent(hooks = {}) {
 	const usePrefs = (prefs) => reactStub.useSyncExternalStore(prefs.subscribe, prefs.getSnapshot);
 	const cleanups = [];
 	const fireEffect = (fn) => { const dispose = fn(); if (typeof dispose === "function") cleanups.push(dispose); };
-	// eslint-disable-next-line no-new-func
-	const factory = new Function("usePrefs", "useEffect", "document", depSrc
-		+ "\nreturn { tswHasUnfinished, TodoSweeper };");
-	return {
-		cleanups,
-		...factory(usePrefs, hooks.useEffect ?? fireEffect, hooks.document)
+	// ref 表按「帧」复用：同一组件实例连续渲染时，第 k 次 useRef 命中第 k 个格子
+	// （模拟 React 的 hook slot 语义）；resetRefs() 清空全部，startFrame() 只把
+	// 游标归零（保留格子），用来模拟「同实例下一帧」。
+	let refs = [];
+	let cursor = 0;
+	const nextRef = (init) => {
+		const index = cursor;
+		cursor += 1;
+		if (refs[index] === void 0) refs[index] = { current: init };
+		return refs[index];
 	};
+	const startFrame = () => { cursor = 0; };
+	const resetRefs = () => { refs = []; cursor = 0; };
+	// eslint-disable-next-line no-new-func
+	const factory = new Function("react", "usePrefs", "useEffect", "useRef", "document", depSrc
+		+ "\nreturn { TSW_STEPS_PER_ITEM, tswSignature, tswKernelCompleted, tswAdvanceFromSteps, tswDeriveStatuses, TodoProgressDock };");
+	const api = factory(
+		{ ...reactStub, useRef: nextRef, useEffect: hooks.useEffect ?? fireEffect },
+		usePrefs,
+		hooks.useEffect ?? fireEffect,
+		nextRef,
+		hooks.document
+	);
+	return { cleanups, resetRefs, startFrame, ...api };
 }
 
 /**
@@ -712,7 +733,7 @@ section("A. 旧内核（无 uiConversation）：静默降级");
 		["功能二 折叠条", "sidebar.footer.action/ui-tools-workspace-collapse"],
 		["功能三 工作区徽章", "conversation.session.header.actions/ui-tools-workspace-chip"],
 		["功能四 设置页", "settings.section/dsh-ui-tools"],
-		["功能七 待办清扫", "conversation.input.dock/ui-tools-todo-sweeper"]
+		["功能七 待办进度面板", "conversation.input.dock/ui-tools-todo-progress"]
 	]) {
 		check(`旧内核保留 ${label}`, env.ledger.registered.includes(seat), seat);
 	}
@@ -776,16 +797,17 @@ section("B. 新内核（提供 uiConversation）：六个功能全部生效");
 			// v0.4.29：胶囊悬浮窗外壳（position:fixed + 光标）也必须随共享标签注入。
 			["功能五 胶囊 TSP_CSS", "[data-tsp-capsule]"],
 			// 功能七的哨兵必须落在「真正隐藏面板的那条规则」上：只查
-			// `[data-ui-tools-todo-sweep]` 会被 `html[data-ui-tools-todo-sweep]`
+			// `[data-ui-tools-todo-mirror]` 会被 `html[data-ui-tools-todo-mirror]`
 			// 前缀单独命中，于是把 `{display:none !important}` 删掉也能假绿
-			// （v0.4.28 负向对照实测踩到）。改查目标选择器本体。
-			["功能七 TSW_CSS", "[data-testid=\"todo-panel\"]"]
+			// （v0.4.28 负向对照实测踩到）。改查目标选择器本体 + 镜像面板样式。
+			["功能七 TSW_CSS", "[data-testid=\"todo-panel\"]"],
+			["功能七 镜像面板 TSW_CSS", "[data-todo-mirror]"]
 		];
 		const missing = sentinels.filter(([, needle]) => !css.includes(needle)).map(([label]) => label);
-		check("共享样式标签含全部六份 CSS 哨兵（v0.4.28 起含 TSW_CSS；v0.4.29 起含胶囊外壳）",
-			missing.length === 0, missing.length === 0 ? "六份齐全" : `缺失：${missing.join("、")}`);
+		check("共享样式标签含全部 CSS 哨兵（六份功能 CSS + 胶囊外壳 + 镜像面板）",
+			missing.length === 0, missing.length === 0 ? "齐全" : `缺失：${missing.join("、")}`);
 		// 光有目标选择器还不够：必须真的带 display:none !important 才叫「隐藏」。
-		const tswRule = /html\[data-ui-tools-todo-sweep\]\s*\[data-testid="todo-panel"\]\s*\{[^}]*display\s*:\s*none\s*!important[^}]*\}/.test(css);
+		const tswRule = /html\[data-ui-tools-todo-mirror\]\s*\[data-testid="todo-panel"\]\s*\{[^}]*display\s*:\s*none\s*!important[^}]*\}/.test(css);
 		check("功能七 TSW_CSS 隐藏规则完整（作用域 + 目标 + display:none !important）",
 			tswRule, tswRule ? "规则完整" : "规则缺失或未带 display:none !important");
 		check("不再存在功能二的独立 style 标签（id 已废弃）",
@@ -1091,92 +1113,150 @@ section("B2. 功能五：输出速度计（dock 统计行 pill：末回合精确
 }
 
 
-/* ══════════════════════ 场景 B4：功能七 待办清扫（v0.4.28） ══════════════════════
- * 官方 TodoPanel 的转圈是内核「哑快照」缺口：todos 投影的 host reducer 只有
- * todo/write 覆盖与 turn/start 清空，回合结束 / 停止 / 出错都不对账 —— 模型
- * 最后一轮留下未完成项直接收尾时，面板带着 1.5s 转圈圆点永驻。
- * 插件侧修复 = 同槽（conversation.input.dock）挂恒 null 哨兵：回合没在跑且
- * todos 仍有 in_progress/pending 时给 <html> 打 data-ui-tools-todo-sweep，
- * 由共享标签里的 TSW_CSS 隐藏官方面板本体 [data-testid="todo-panel"]。
+/* ══════════════════════ 场景 B4：功能七 待办进度面板（v0.4.30） ══════════════════════
+ * 需求（v0.4.30 重新定义，取代 v0.4.28 的「隐藏面板」）：
+ *   ① 模型只写一次 todos 就不再更新 → 面板永远停在第一项转圈；插件要按
+ *      助手步数推断进度、自动推进状态（不改内核 reducer，纯展示层）。
+ *   ② 官方折叠态只渲 header 汇总，看不到每项状态 → 插件镜像面板始终展开
+ *      每一项 + 状态点。
+ * 做法：同槽（conversation.input.dock，order 30，新 id）挂 TodoProgressDock，
+ * 读 useProjection("todos") + useProjection("sessionStats").steps + session.running，
+ * 渲染镜像列表，同时给 <html> 打 data-ui-tools-todo-mirror 由 TSW_CSS 隐藏
+ * 官方面板本体（避免双层）。
  * ═══════════════════════════════════════════════════════════════════════════════ */
-section("B4. 功能七：待办清扫（conversation.input.dock 对账哨兵）");
+section("B4. 功能七：待办进度面板（conversation.input.dock 镜像 + 按步数推断）");
 {
 	const env = await mount({ alpha: true });
 
-	// ① 注册位：官方 todo(0) / queue(20) 之后，order 30，纯增量新增。
+	// ① 注册位：官方 todo(0) / queue(20) 之后，order 30，新 id（不替换官方）。
 	const dockRows = env.seats.get("conversation.input.dock") ?? [];
-	const sweeper = dockRows.find((row) => row.def.id === "ui-tools-todo-sweeper");
-	check("功能七哨兵注册进 conversation.input.dock", sweeper !== void 0,
+	const mirror = dockRows.find((row) => row.def.id === "ui-tools-todo-progress");
+	check("功能七面板注册进 conversation.input.dock", mirror !== void 0,
 		env.ledger.registered.join(", "));
-	check("哨兵 order = 30（官方 todo 0 / queue 20 之后）", sweeper?.def.order === 30, String(sweeper?.def.order));
-	check("哨兵 name 与注册名一致（内核 buildNode 校验 name）",
-		sweeper?.def.name === "conversation.input.dock", String(sweeper?.def.name));
+	check("面板 order = 30（官方 todo 0 / queue 20 之后）", mirror?.def.order === 30, String(mirror?.def.order));
+	check("面板 name 与注册名一致（内核 buildNode 校验 name）",
+		mirror?.def.name === "conversation.input.dock", String(mirror?.def.name));
+	check("面板带 locale 命名空间（词典走 ui-tools-todo）",
+		mirror?.def.locale === "ui-tools-todo", String(mirror?.def.locale));
 
 	// ② 偏好默认开启（经 settings.section face 暴露的同一份 prefs 仓库）。
 	const setFace = faceAt(env.seats, "settings.section");
 	check("todoSweepEnabled 默认 = true", setFace?.prefs?.getSnapshot().todoSweepEnabled === true,
 		JSON.stringify(setFace?.prefs?.getSnapshot() ?? null));
 
-	// ③ 哨兵组件经 bundle 真实作用域直接调用，恒渲染 null（不产生可见节点）。
-	check("哨兵组件直接调用恒返回 null（真实 bundle 闭包）",
-		sweeper?.component?.({ prefs: setFace?.prefs }) === null);
-
-	// ④ 纯函数 + 副作用矩阵（取数段直译；useEffect 立即执行、document 用假 <html>）。
+	// ③ 纯函数矩阵（取数段直译）。
 	const tsw = loadTswComponent();
-	check("tswHasUnfinished：空列表 / 全 completed / 非数组 → false",
-		tsw.tswHasUnfinished([]) === false
-		&& tsw.tswHasUnfinished([{ status: "completed" }]) === false
-		&& tsw.tswHasUnfinished(null) === false);
-	check("tswHasUnfinished：in_progress / pending → true",
-		tsw.tswHasUnfinished([{ status: "in_progress" }]) === true
-		&& tsw.tswHasUnfinished([{ status: "pending" }]) === true);
+	check("tswKernelCompleted：只认连续 completed 前缀",
+		tsw.tswKernelCompleted([{ status: "completed" }, { status: "completed" }, { status: "pending" }]) === 2
+		&& tsw.tswKernelCompleted([{ status: "pending" }, { status: "completed" }]) === 0
+		&& tsw.tswKernelCompleted(null) === 0);
 
+	check("tswAdvanceFromSteps：步数 ÷ 每项步数向下取整，负数/非法按 0",
+		tsw.tswAdvanceFromSteps(5, 2) === 2
+		&& tsw.tswAdvanceFromSteps(1, 2) === 0
+		&& tsw.tswAdvanceFromSteps(-3, 2) === 0
+		&& tsw.tswAdvanceFromSteps(NaN, 2) === 0
+		&& tsw.tswAdvanceFromSteps(5, 0) === 5);
+
+	check("tswSignature：内容/状态变则签名变",
+		tsw.tswSignature([{ content: "a", status: "pending" }]) !== tsw.tswSignature([{ content: "a", status: "in_progress" }])
+		&& tsw.tswSignature([{ content: "a", status: "pending" }]) === tsw.tswSignature([{ content: "a", status: "pending" }])
+		&& tsw.tswSignature(null) === "");
+
+	// 核心需求①：模型只写一次（内核状态永远停在 in_progress 第一项），
+	// 插件按步数推断后应当推进 —— 后续项被判为 completed，前沿项 in_progress。
+	const frozen = [
+		{ content: "第一项", status: "in_progress" },
+		{ content: "第二项", status: "pending" },
+		{ content: "第三项", status: "pending" }
+	];
+	const advanced = tsw.tswDeriveStatuses(frozen, 2, true);
+	check("按步数推断：内核冻在 in_progress 时，前 2 项被判 completed、第 3 项 in_progress",
+		advanced.length === 3
+		&& advanced[0].status === "completed"
+		&& advanced[1].status === "completed"
+		&& advanced[2].status === "in_progress",
+		JSON.stringify(advanced.map((r) => r.status)));
+	check("推断出的 completed 带 inferred 标记（UI 可标「按步数推断」）",
+		advanced[0].inferred === true && advanced[2].inferred === false);
+
+	check("内核已判 completed 的项绝不降级（advance=0 也保持 completed）",
+		tsw.tswDeriveStatuses([{ content: "x", status: "completed" }, { content: "y", status: "pending" }], 0, true)[0].status === "completed");
+
+	check("运行中不把最后一项也判完成（避免未收尾就全绿）",
+		tsw.tswDeriveStatuses([{ content: "a", status: "pending" }, { content: "b", status: "pending" }], 9, true)
+			.filter((r) => r.status === "completed").length === 1);
+
+	check("空闲时不再给 in_progress（消除「永远转圈」）",
+		tsw.tswDeriveStatuses(frozen, 1, false).filter((r) => r.status === "in_progress").length === 0);
+
+	// ④ 组件层：真实 bundle 闭包直接调用，验证镜像 DOM 与 <html> 属性。
 	const attrs = new Map();
 	const fakeDoc = { documentElement: {
 		setAttribute: (k, v) => { attrs.set(k, v); },
 		removeAttribute: (k) => { attrs.delete(k); }
 	} };
-	const tswDom = loadTswComponent({ document: fakeDoc });
+	const proxiedDoc = new Proxy(fakeDoc, {});
+	const tswDom = loadTswComponent({ document: proxiedDoc });
 	const on = { getSnapshot: () => ({ todoSweepEnabled: true }), subscribe: () => () => {} };
 	const off = { getSnapshot: () => ({ todoSweepEnabled: false }), subscribe: () => () => {} };
-	const left = [{ status: "in_progress" }];
-	const allDone = [{ status: "completed" }];
+	const proj = (todos, steps) => (name) => (name === "todos" ? todos : name === "sessionStats" ? { steps } : null);
 
-	attrs.clear(); tswDom.cleanups.length = 0;
-	tswDom.TodoSweeper({ session: { running: true }, useProjection: () => left, prefs: on });
-	check("回合进行中：不打属性（面板照常显示转圈）", !attrs.has("data-ui-tools-todo-sweep"),
-		`attrs=${[...attrs.entries()].map(([k, v]) => `${k}=${v}`).join(" ") || "空"}`);
+	const kids = (el) => (el !== null && typeof el === "object" && Array.isArray(el.children) ? el.children.flat(1) : []);
+	const lisOf = (tree) => { const ts = kids(tree); const ul = ts.length > 1 ? ts[1] : null; return kids(ul); };
 
-	attrs.clear(); tswDom.cleanups.length = 0;
-	tswDom.TodoSweeper({ session: { running: false }, useProjection: () => left, prefs: on });
-	check("回合结束 + 残留 in_progress：打属性 on（TSW_CSS 隐藏官方面板）",
-		attrs.get("data-ui-tools-todo-sweep") === "on");
-	const lastCleanup = tswDom.cleanups[tswDom.cleanups.length - 1];
-	check("组件卸载 cleanup 摘除属性（不留全局状态）",
-		typeof lastCleanup === "function" && (lastCleanup(), !attrs.has("data-ui-tools-todo-sweep")));
+	// 同一组件实例连续两帧：首帧建立进度基线（advance=0），步数涨上去后按增量推进。
+	attrs.clear(); tswDom.cleanups.length = 0; tswDom.resetRefs();
+	const frame1 = tswDom.TodoProgressDock({ session: { running: true }, useProjection: proj(frozen, 4), t: (k, d) => d ?? k, prefs: on });
+	const ts = kids(frame1);
+	check("开启且有 todos：镜像面板渲染 section（head + list 两段）",
+		frame1 !== null && frame1.type === "section" && ts.length === 2,
+		String(ts.length));
+	const ul = ts.length > 1 ? ts[1] : null;
+	check("镜像面板始终展开列表（ul.tsw-list 含 3 个 li，不折叠）",
+		ul !== null && ul.type === "ul" && kids(ul).length === 3,
+		String(kids(ul).length));
+	check("首帧（步数未涨）：内核冻在 in_progress，第 1 项 in_progress、其余 pending",
+		lisOf(frame1).map((x) => x.props["data-status"]).join(",") === "in_progress,pending,pending",
+		lisOf(frame1).map((x) => x.props["data-status"]).join(","));
+	check("渲染镜像面板时给 <html> 打 data-ui-tools-todo-mirror=on",
+		attrs.get("data-ui-tools-todo-mirror") === "on");
 
-	attrs.clear(); tswDom.cleanups.length = 0;
-	tswDom.TodoSweeper({ session: { running: false }, useProjection: () => allDone, prefs: on });
-	check("回合结束 + 待办全部完成：不打属性（面板本就该显示完成态）", !attrs.has("data-ui-tools-todo-sweep"));
+	// 第二帧：同一实例、同签名 todos，steps 4 → 8（+4 步 = 2 项）→ 自动推进。
+	attrs.clear(); tswDom.cleanups.length = 0; tswDom.startFrame();
+	const frame2 = tswDom.TodoProgressDock({ session: { running: true }, useProjection: proj(frozen, 8), t: (k, d) => d ?? k, prefs: on });
+	check("按步数推断：步数涨 4（每 2 步一项）→ 前 2 项 completed、第 3 项 in_progress",
+		lisOf(frame2).map((x) => x.props["data-status"]).join(",") === "completed,completed,in_progress",
+		lisOf(frame2).map((x) => x.props["data-status"]).join(","));
+	const li0 = lisOf(frame2)[0];
+	const li0kids = kids(li0);
+	check("每项都渲染状态点 glyph 与文案（不依赖官方折叠态）",
+		li0kids.length === 2 && li0kids[0]?.props?.className === "tsw-glyph"
+		&& li0kids[1]?.props?.className === "tsw-text");
+	check("推断出的 completed 项带 data-inferred=1（UI 可标「按步数推断」）",
+		li0?.props?.["data-inferred"] === "1");
+	attrs.clear(); tswDom.cleanups.length = 0; tswDom.resetRefs();
+	const emptyTree = tswDom.TodoProgressDock({ session: { running: true }, useProjection: proj([], 0), t: (k, d) => d ?? k, prefs: on });
+	check("todos 为空：返回 null、不打属性（官方面板本就不渲染）",
+		emptyTree === null && !attrs.has("data-ui-tools-todo-mirror"));
 
-	attrs.clear(); tswDom.cleanups.length = 0;
-	tswDom.TodoSweeper({ session: { running: false }, useProjection: () => left, prefs: off });
-	check("开关关闭：不打属性", !attrs.has("data-ui-tools-todo-sweep"));
+	attrs.clear(); tswDom.cleanups.length = 0; tswDom.resetRefs();
+	const offTree = tswDom.TodoProgressDock({ session: { running: true }, useProjection: proj(frozen, 4), t: (k, d) => d ?? k, prefs: off });
+	check("开关关闭：返回 null、不打属性（恢复官方面板）",
+		offTree === null && !attrs.has("data-ui-tools-todo-mirror"));
 
-	attrs.clear(); tswDom.cleanups.length = 0;
-	tswDom.TodoSweeper({ useProjection: () => left, prefs: on });
-	check("session 快照缺席（未知内核形态）：fail-open 不打属性", !attrs.has("data-ui-tools-todo-sweep"));
+	attrs.clear(); tswDom.cleanups.length = 0; tswDom.resetRefs();
+	const noProj = tswDom.TodoProgressDock({ session: { running: true }, useProjection: void 0, t: (k, d) => d ?? k, prefs: on });
+	check("useProjection 缺席（kit 不给）：fail-open 返回 null",
+		noProj === null && !attrs.has("data-ui-tools-todo-mirror"));
 
-	attrs.clear(); tswDom.cleanups.length = 0;
-	tswDom.TodoSweeper({ session: { running: false }, useProjection: void 0, prefs: on });
-	check("useProjection 缺席（kit 不给）：fail-open 不打属性", !attrs.has("data-ui-tools-todo-sweep"));
-
-	// SSR / 测试形态：document 缺席时 effect 直接跳过，不抛错、不留 cleanup。
+	// SSR / 测试形态：document 缺席时 effect 直接跳过，不抛错。
 	const tswNoDoc = loadTswComponent();
-	tswNoDoc.TodoSweeper({ session: { running: false }, useProjection: () => left, prefs: on });
-	check("document 缺席（SSR 形态）：effect 跳过、不抛错", tswNoDoc.cleanups.length === 0);
+	const noDocTree = tswNoDoc.TodoProgressDock({ session: { running: true }, useProjection: proj(frozen, 4), t: (k, d) => d ?? k, prefs: on });
+	check("document 缺席（SSR 形态）：effect 跳过、不抛错且仍渲染",
+		tswNoDoc.cleanups.length === 0 && noDocTree !== null);
 
-	// ⑤ 注册面反向钉：哨兵不建 Definition、不注册事件（纯槽位 + CSS）。
+	// ⑤ 注册面反向钉：面板不建 Definition、不注册事件（纯槽位 + CSS）。
 	check("功能七不走 Definition 通道（ledger.definitions 仍为空）",
 		env.ledger.definitions.length === 0,
 		env.ledger.definitions.map((def) => def.kind).join(", ") || "（无）");
@@ -1251,7 +1331,7 @@ section("D. 内核不提供 remote：功能一优雅缺席，不拖垮 entry（�
 		["功能二 折叠条", "sidebar.footer.action/ui-tools-workspace-collapse"],
 		["功能三 工作区徽章", "conversation.session.header.actions/ui-tools-workspace-chip"],
 		["功能四 设置页", "settings.section/dsh-ui-tools"],
-		["功能七 待办清扫", "conversation.input.dock/ui-tools-todo-sweeper"]
+		["功能七 待办进度面板", "conversation.input.dock/ui-tools-todo-progress"]
 	]) {
 		check(`remote 缺席时仍保留 ${label}`, env.ledger.registered.includes(seat), seat);
 	}

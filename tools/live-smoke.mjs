@@ -9,7 +9,7 @@
  *   ③ 功能一双按钮座位真的渲染、没有静默降级回官方控件；
  *   ④ 打开设置中心「DSH UI 工具」页并截图（人工复核视觉）；
  *   ⑤ 功能五速度计（v0.4.29 起为可拖动胶囊悬浮窗）与内核 TPS 口径一致；
- *   ⑥ 功能七待办清扫的 TSW_CSS 隐藏规则与 <html> 属性契约真机生效；
+ *   ⑥ 功能七待办进度面板（镜像每项状态 + 按步数推断）的 CSS 契约与 <html> 属性真机生效；
  *   ⑦ 顺带渲染 demo/settings.html 的新旧内核两种状态，核对灰显样式。
  *
  * 用法：node tools/live-smoke.mjs <baseURL+token> [outDir]
@@ -232,16 +232,16 @@ try {
 			// 旧断言写死 3 行是 v0.4.9 的历史快照，会使真机 smoke 永远红；这里改为「逐行点名」，
 			// 行数变化不报错，缺任何一行才报错。
 			const labels = set.rows.map((row) => row.label).join(" / ");
-			// v0.4.28：多出功能七「会话待办」分组的一行（回合结束后隐藏仍在转圈的待办面板）。
-			const expectRows = ["工作区徽章", "默认折叠", "输出速度计", "右键菜单", "待办面板"];
+			// v0.4.30：功能七改为「待办进度面板」（镜像每项状态 + 按步数推断推进）。
+			const expectRows = ["工作区徽章", "默认折叠", "输出速度计", "右键菜单", "待办进度面板"];
 			const missing = expectRows.filter((needle) => !set.rows.some((row) => row.label.includes(needle)));
-			check("五个偏好行都在（含 v0.4.28 会话待办）", missing.length === 0, missing.length ? `缺 ${missing.join("、")}（实际：${labels}）` : labels);
+			check("五个偏好行都在（含 v0.4.30 待办进度面板）", missing.length === 0, missing.length ? `缺 ${missing.join("、")}（实际：${labels}）` : labels);
 			const chipRow = set.rows.find((row) => row.label.includes("工作区徽章"));
 			check("功能三开关（工作区徽章）在设置页", !!chipRow, JSON.stringify(chipRow ?? null));
 			const tspRow = set.rows.find((row) => row.label.includes("输出速度计"));
 			check("功能五开关（输出速度计）在设置页且不灰显（v0.4.6）", tspRow && tspRow.disabled === false, JSON.stringify(tspRow ?? null));
-			const tswRow = set.rows.find((row) => row.label.includes("待办面板"));
-			check("功能七开关（回合结束后隐藏待办面板）在设置页且不灰显（v0.4.28）",
+			const tswRow = set.rows.find((row) => row.label.includes("待办进度面板"));
+			check("功能七开关（待办进度面板）在设置页且不灰显（v0.4.30）",
 				tswRow && tswRow.disabled === false, JSON.stringify(tswRow ?? null));
 		}
 		await page.screenshot({ path: path.join(OUT, "02-settings-page.png") });
@@ -446,54 +446,76 @@ try {
 		await page.screenshot({ path: path.join(OUT, "06-token-speed.png") });
 	}
 
-	console.log("\n2d. 功能七：待办清扫（v0.4.28，CSS 契约 + 属性一致性）");
+	console.log("\n2d. 功能七：待办进度面板（v0.4.30，镜像面板 + 按步数推断 + CSS 契约）");
 	{
-		// 真机上无法保证「恰好有一个回合结束但残留 in_progress 待办」的现场，
-		// 所以这里不赌现场，而是验证两件确定性的事：
-		//   ① 共享样式标签里确实带了 TSW_CSS 的隐藏规则；
-		//   ② <html> 上的 data-ui-tools-todo-sweep 与面板可见性始终自洽
-		//      （打了属性 => 面板必须被 display:none 压掉；没打 => 不干扰面板），
-		//      并在真机面板存在时就地翻转属性验证 CSS 真的生效。
+		// 需求已由用户重新定义（v0.4.30）：不再「隐藏面板」，而是：
+		//   ① 始终展开每项状态（官方折叠态看不到每项）；
+		//   ② 按助手步数自动推进状态（模型只写一次时不再卡在进行中）。
+		// 真机上无法保证「恰好有 in_progress 待办且步数正在涨」的现场，所以验证
+		// 确定性契约：
+		//   a) 共享样式标签里带了镜像面板样式与「隐藏官方面板」规则；
+		//   b) <html> 属性 data-ui-tools-todo-mirror 与官方面板可见性自洽；
+		//   c) 若镜像面板已渲染（会话有待办），逐项 data-status 合法且每项都有
+		//      状态点 glyph + 文案（折叠态也看得见）。
 		const tsw = await page.evaluate(() => {
 			const styleEl = document.querySelector('style[data-plugin-css="dsh-ui-tools/styles"]');
 			const css = styleEl ? styleEl.textContent || "" : "";
 			const root = document.documentElement;
-			const attr = root.getAttribute("data-ui-tools-todo-sweep");
+			const attr = root.getAttribute("data-ui-tools-todo-mirror");
 			const panel = document.querySelector('[data-testid="todo-panel"]');
 			const before = panel ? getComputedStyle(panel).display : null;
-			// 双向就地翻转（验证 CSS 真的双向生效，而不是单侧空转）：
-			//   ① 打属性 → 必须 display:none
-			//   ② 摘属性 → 必须不再是 none（说明规则确实只在有属性时生效）
-			//   ③ 还原到原始属性值 → 回到原始 display
 			let hiddenWhenOn = null;
 			let visibleWhenOff = null;
 			let restored = null;
 			if (panel) {
-				root.setAttribute("data-ui-tools-todo-sweep", "on");
+				root.setAttribute("data-ui-tools-todo-mirror", "on");
 				hiddenWhenOn = getComputedStyle(panel).display;
-				root.removeAttribute("data-ui-tools-todo-sweep");
+				root.removeAttribute("data-ui-tools-todo-mirror");
 				visibleWhenOff = getComputedStyle(panel).display;
-				if (attr === null) root.removeAttribute("data-ui-tools-todo-sweep");
-				else root.setAttribute("data-ui-tools-todo-sweep", attr);
+				if (attr === null) root.removeAttribute("data-ui-tools-todo-mirror");
+				else root.setAttribute("data-ui-tools-todo-mirror", attr);
 				restored = getComputedStyle(panel).display;
 			}
-			return { hasRule: /data-ui-tools-todo-sweep[^{]*\{?\s*[^}]*todo-panel/.test(css)
-				|| css.includes('html[data-ui-tools-todo-sweep] [data-testid="todo-panel"]'),
-				attr, hasPanel: !!panel, before, hiddenWhenOn, visibleWhenOff, restored };
+			// 镜像面板（若已渲染）：每一项都要有合法 data-status + glyph + 文案。
+			const mirror = document.querySelector("[data-todo-mirror]");
+			let mirrorItems = null;
+			let mirrorAllGood = null;
+			if (mirror) {
+				const items = [...mirror.querySelectorAll(".tsw-item")];
+				mirrorItems = items.length;
+				mirrorAllGood = items.length > 0 && items.every((li) => {
+					const st = li.getAttribute("data-status");
+					const okStatus = st === "completed" || st === "in_progress" || st === "pending";
+					const glyph = li.querySelector(".tsw-glyph");
+					const text = li.querySelector(".tsw-text");
+					return okStatus && glyph !== null && text !== null && (text.textContent || "").trim().length > 0;
+				});
+			}
+			return {
+				hasMirrorCss: css.includes("[data-todo-mirror]") && css.includes(".tsw-item"),
+				hasHideRule: css.includes('html[data-ui-tools-todo-mirror] [data-testid="todo-panel"]'),
+				attr, hasPanel: !!panel, before, hiddenWhenOn, visibleWhenOff, restored,
+				hasMirror: !!mirror, mirrorItems, mirrorAllGood
+			};
 		});
-		console.log(`     待办清扫探针：${JSON.stringify(tsw)}`);
-		check("共享样式标签含功能七隐藏规则（TSW_CSS）", tsw.hasRule === true, `hasRule=${tsw.hasRule}`);
-		check("待办面板存在时：打属性即 display:none、摘属性又恢复可见、还原回原状（CSS 双向真机生效）",
+		console.log(`     待办进度面板探针：${JSON.stringify(tsw)}`);
+		check("共享样式标签含镜像面板样式（[data-todo-mirror] + .tsw-item）", tsw.hasMirrorCss === true, `hasMirrorCss=${tsw.hasMirrorCss}`);
+		check("共享样式标签含官方面板隐藏规则（html[data-ui-tools-todo-mirror] [data-testid=todo-panel]）",
+			tsw.hasHideRule === true, `hasHideRule=${tsw.hasHideRule}`);
+		check("官方面板存在时：打属性即 display:none、摘属性又恢复可见、还原回原状（CSS 双向真机生效）",
 			tsw.hasPanel ? (tsw.hiddenWhenOn === "none" && tsw.visibleWhenOff !== "none" && tsw.restored === tsw.before) : true,
 			tsw.hasPanel
 				? `before=${tsw.before} on=${tsw.hiddenWhenOn} off=${tsw.visibleWhenOff} restored=${tsw.restored}`
-				: "本会话无待办面板（信息项，不阻塞）");
-		check("清扫属性与面板可见性自洽（attr=on ⇒ 面板被隐藏；attr 缺省 ⇒ 不误伤面板）",
+				: "本会话无官方面板（信息项，不阻塞）");
+		check("mirror 属性与官方面板可见性自洽（attr=on ⇒ 官方被隐藏；attr 缺省 ⇒ 不误伤）",
 			tsw.hasPanel
 				? (tsw.attr === "on" ? tsw.before === "none" : tsw.before !== "none")
 				: tsw.attr !== "on",
 			`attr=${tsw.attr ?? "(无)"} before=${tsw.before ?? "(无面板)"}`);
-		await page.screenshot({ path: path.join(OUT, "07-todo-sweep.png") });
+		check("镜像面板（会话有待办时）每项都有合法 data-status + 状态点 glyph + 文案（折叠态也看得见）",
+			tsw.hasMirror ? tsw.mirrorAllGood === true : true,
+			tsw.hasMirror ? `items=${tsw.mirrorItems} allGood=${tsw.mirrorAllGood}` : "本会话未生成镜像面板（信息项，不阻塞）");
+		await page.screenshot({ path: path.join(OUT, "07-todo-progress.png") });
 	}
 
 	console.log("\n3. demo 静态预览（灰显两态）");
