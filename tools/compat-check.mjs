@@ -934,8 +934,12 @@ section("B2. 功能五：输出速度计（dock 统计行 pill：末回合精确
 			capsuleEl?.props?.["data-tsp-capsule"] === "" && capsuleEl?.props?.style?.position === "fixed", JSON.stringify(capsuleEl?.props?.style));
 		check("胶囊：读数子节点带 data-tsp-pill 与 title/aria（真机选择器与可访问性）",
 			bodyEl?.props?.["data-tsp-pill"] === "" && typeof capsuleEl.props.title === "string" && bodyEl.props["aria-label"] === "a30");
-		check("胶囊：注册四个指针/双击拖动句柄（真机可拖动契约）",
-			typeof capsuleEl.props.onPointerDown === "function" && typeof capsuleEl.props.onPointerMove === "function" && typeof capsuleEl.props.onPointerUp === "function" && typeof capsuleEl.props.onDoubleClick === "function");
+		check("胶囊：注册三个指针句柄（真机可拖动契约）",
+			typeof capsuleEl.props.onPointerDown === "function" && typeof capsuleEl.props.onPointerMove === "function" && typeof capsuleEl.props.onPointerUp === "function");
+		// 双击复位必须走 pointerdown 自带判定，不能挂 onDoubleClick：pointerdown 上
+		// preventDefault 会抑制兼容鼠标事件，dblclick 永远不来（v0.4.29 真机实测）。
+		check("胶囊：不挂 onDoubleClick（pointerdown 上 preventDefault 会抑制 dblclick）",
+			capsuleEl.props.onDoubleClick === void 0);
 		check("胶囊：开关关闭时渲染 null（不占位）", TokenSpeedDockPill({ useTspChat, t, prefs: off }) === null);
 		check("胶囊：无任何可算数据时渲染 null（不显示假值）",
 			TokenSpeedDockPill({ useTspChat: (sel) => sel({ legacy: { nodes: [] } }), t, prefs: on }) === null);
@@ -961,6 +965,39 @@ section("B2. 功能五：输出速度计（dock 统计行 pill：末回合精确
 			const saved = api.tspReadPos();
 			check("胶囊：拖动后坐标写入 localStorage 并能读回（位置持久化）",
 				saved !== null && saved.x === 110 && saved.y === 120, JSON.stringify(saved));
+
+			// 只点不拖不落盘：down→up 无 move 时坐标不应被写死成默认位。
+			api.tspClearPos();
+			const api2 = loadTspComponents();
+			const cap2 = unwrap(api2.TokenSpeedDockPill({ useTspChat, t, prefs: on }));
+			cap2.props.onPointerDown({ clientX: 300, clientY: 400, pointerId: 1, currentTarget: target, preventDefault: () => {} });
+			cap2.props.onPointerUp({});
+			check("胶囊：只点一下没拖动不写 localStorage（不污染用户位置）", api2.tspReadPos() === null,
+				JSON.stringify(api2.tspReadPos()));
+
+			// 双击复位：两次 pointerdown（350ms 内、位移<6px）→ 清空位置并复位。
+			const api3 = loadTspComponents();
+			api3.tspWritePos({ x: 500, y: 400 });
+			const cap3 = unwrap(api3.TokenSpeedDockPill({ useTspChat, t, prefs: on }));
+			const pd = (x, y) => cap3.props.onPointerDown({ clientX: x, clientY: y, pointerId: 1, currentTarget: target, preventDefault: () => {} });
+			pd(500, 400); pd(501, 400);
+			check("胶囊：双击（连续两次 pointerdown）复位到默认位并清掉持久化位置",
+				api3.tspReadPos() === null, JSON.stringify(api3.tspReadPos()));
+			// 慢两下（>350ms）不算双击：位置不会被清。
+			const api4 = loadTspComponents();
+			api4.tspWritePos({ x: 600, y: 500 });
+			const cap4 = unwrap(api4.TokenSpeedDockPill({ useTspChat, t, prefs: on }));
+			const realNow = Date.now;
+			let tick = 0;
+			Date.now = () => (tick += 1000) + realNow();
+			try {
+				cap4.props.onPointerDown({ clientX: 600, clientY: 500, pointerId: 1, currentTarget: target, preventDefault: () => {} });
+				cap4.props.onPointerDown({ clientX: 600, clientY: 500, pointerId: 1, currentTarget: target, preventDefault: () => {} });
+			} finally {
+				Date.now = realNow;
+			}
+			check("胶囊：两次慢按（超过 350ms）不算双击，位置保留", api4.tspReadPos() !== null,
+				JSON.stringify(api4.tspReadPos()));
 		}
 
 		// 位置工具的纯函数契约：夹取 / 默认位 / 坏数据回退。

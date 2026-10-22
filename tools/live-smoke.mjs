@@ -381,11 +381,24 @@ try {
 			});
 			console.log(`     拖动后：${JSON.stringify(dragResult)}`);
 			// 拖完复位（双击 = 回到默认位 + 清掉持久化），避免污染后续人工使用。
-			await page.evaluate(() => {
+			// v0.4.29 起双击复位是 pointerdown 内置判定（原生 dblclick 被
+			// pointerdown 的 preventDefault 抑制），所以这里发两次 pointerdown。
+			const resetInfo = await page.evaluate(() => {
 				const pill = document.querySelector("[data-tsp-pill]");
 				const capsule = pill ? pill.closest("[data-tsp-capsule]") : null;
-				if (capsule) capsule.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+				if (!capsule) return { ok: false };
+				const r = capsule.getBoundingClientRect();
+				const x = Math.round(r.left + r.width / 2);
+				const y = Math.round(r.top + r.height / 2);
+				const fire = () => capsule.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, clientX: x, clientY: y, pointerId: 1 }));
+				fire();
+				fire();
+				return { ok: true, stored: localStorage.getItem("dsh-ui-tools:token-speed:pos:v1"), left: capsule.style.left, top: capsule.style.top };
 			});
+			console.log(`     双击复位后：${JSON.stringify(resetInfo)}`);
+			check("双击（两次 pointerdown）复位胶囊并清掉持久化位置",
+				resetInfo.ok === true && resetInfo.stored === null,
+				JSON.stringify(resetInfo));
 			await new Promise((r) => setTimeout(r, 250));
 		}
 
