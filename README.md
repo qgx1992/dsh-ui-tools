@@ -338,7 +338,7 @@ client 侧无写入通道），只能做**展示层推断 + 恒展开渲染**。
 - 该区间已对 npm 上全部 **29 个**已发布内核版本 + 3 个未来哨兵逐项断言，并保证普通 semver 语义与市场侧 `includePrerelease` 语义**判决一致**（见下「自检」）。
 - **v0.4.8 修正**：此前区间写作 `… || >=0.1.6-0`，其末项在**普通语义**下**不覆盖**任何 `0.1.7-*` / `0.2.0-*` 预发布版（只在 `includePrerelease` 下才成立），实测有 **6 条分流**（`0.1.7-alpha.1/2`、`0.1.7-rc.1/2`、`0.2.0-rc.1/2`）。原因同上一节：预发布版只与同 `x.y.z` 的元组比较，而 `>=0.1.6-0` 的下界落在 0.1.6 线。更隐蔽的是——当时 0b 的版本表**只列了 21 个**，恰好漏掉整条 0.1.7/0.2.0 线，于是「两种语义判决一致」那条断言**假绿**。现改为逐条发布线 `^0.1.6-0 || ^0.1.7-0 || ^0.2.0-0 || >=0.3.0-0` 并**全量列表**，令同类裂缝无处可藏。
 
-> **验证口径**：`node tools/compat-check.mjs` 跑在本机已装内核副本的**真实 cordis** 上（v0.4.31 实测 **127/127** 全绿；断言计数随内核枚举动态变化，门槛是**零 FAIL** 而非某个具体数字，因此别把它当固定指标读。另注意它需要 `DSH_CORDIS_ENTRY` / `DSH_SEMVER_ENTRY` 指向可用的 cordis 与 semver——本机可指向仓库内 `.scratch/kernel/...`），场景断言七个功能的槽位注册、子 fiber 状态与 boot 审计口径；B3 自 v0.4.25 起改为「Definition 通道已移除」的源码反向钉（不再逐内核驱动装配器）；B4 自 v0.4.30 起覆盖功能七待办进度面板（注册位/纯函数推断口径/不降级/副作用矩阵/fail-open）。真机（浏览器）行为另由 `tools/live-smoke.mjs` 覆盖（含 2c 功能五胶囊浮窗契约与 2d 功能七待办进度面板 CSS 契约），需自备 URL+token。
+> **验证口径**：`node tools/compat-check.mjs` 跑在本机已装内核副本的**真实 cordis** 上（v0.4.32 实测 **127/127** 全绿；断言计数随内核枚举动态变化，门槛是**零 FAIL** 而非某个具体数字，因此别把它当固定指标读。另注意它需要 `DSH_CORDIS_ENTRY` / `DSH_SEMVER_ENTRY` 指向可用的 cordis 与 semver——本机可指向仓库内 `.scratch/kernel/...`），场景断言七个功能的槽位注册、子 fiber 状态与 boot 审计口径；B3 自 v0.4.25 起改为「Definition 通道已移除」的源码反向钉（不再逐内核驱动装配器）；B4 自 v0.4.30 起覆盖功能七待办进度面板（注册位/纯函数推断口径/不降级/副作用矩阵/fail-open）。真机（浏览器）行为另由 `tools/live-smoke.mjs` 覆盖（含 2c 功能五胶囊浮窗契约与 2d 功能七待办进度面板 CSS 契约），需自备 URL+token。
 
 > **profile 安装漂移**：`tools/check-profile-drift.mjs` 会比对 `~/.dsh/profiles/*/` 三处口径——`package.json` 的声明、`pnpm-lock.yaml` 的 specifier 与 resolved 版本、`node_modules` 里实际安装的版本。三者不一致时必须先修 profile，否则「改了代码、刷新页面、毫无变化」——因为真实 GUI 跑的是 profile 里的安装副本，而 `compat-check.mjs` 读的**永远是仓库 `lib/client.js`**，两者是两份文件。
 
@@ -373,7 +373,17 @@ node tools/live-smoke.mjs <URL+token>   # 真机冒烟（可选；自动探测�
 
 ## 变更记录
 
-- **v0.4.31（本次）**：**修功能七镜像面板过宽**（用户：「你是有毒吗，把待办拉那么宽干什么？把宽度跟输入框对齐」）。
+- **v0.4.32（本次）**：**插件简介改回一句话**（用户：「把插件的简介弄简短一点啊，现在点开插件一大篇」）。
+  - **根因**：真机定位到 DSH「插件」页点开某插件后的**详情面板**，是把该包 `package.json` 的 `description` 字段**原样全文渲染**的；
+    而本项目此前惯例是「每版在 description 末尾追加一条变更说明」，v0.4.2 一路累积到 v0.4.31，`description` 涨到 **16376 字**，
+    所以点开就是一大篇。（列表页的卡片是单行 `-webkit-line-clamp: 1` 截断，本来不丑——丑的只有点开之后。）
+  - **修法**：`description` 固定为**一句话简介**（约 90 字，覆盖七个功能 + 「只改界面，不改内核源码」定位），
+    **16376 → 93 字**；版本变更说明**只进本文件「变更记录」与 git tag / GitHub Release**，不再往 `description` 里堆。
+  - **验证**：`description` 仅此一处被替换，`name`/`version`/`engines`/`dsh`/`files`/`exports` 等字段逐字节未动（脚本化 splice + 逐字段比对断言）；
+    全仓库无任何断言依赖 `description`（`grep` `tools/*.mjs` 零命中），故不影响回归。
+  - **文档与版本**：`package.json` `0.4.31 → 0.4.32`；本条替代此前「description 追加本条」的惯例。
+
+- **v0.4.31**：**修功能七镜像面板过宽**（用户：「你是有毒吗，把待办拉那么宽干什么？把宽度跟输入框对齐」）。
   - **根因**：`[data-todo-mirror]` 用的是 `width: calc(100% - 16px)`。它在 `conversation.input.dock` 里是独立块级元素，
     `100%` 取的是整个 composer 列宽（比输入框卡片宽出一大截），减 16px 仍远宽于输入框，于是面板左右各溢出一截。
   - **修法**：改用内核自己的 composer 变量——`width: calc(100% - var(--dsh-composer-side-clearance,16px) - var(--dsh-composer-side-clearance,16px))`
