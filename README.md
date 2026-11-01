@@ -338,7 +338,11 @@ client 侧无写入通道），只能做**展示层推断 + 恒展开渲染**。
 - 该区间已对 npm 上全部 **29 个**已发布内核版本 + 3 个未来哨兵逐项断言，并保证普通 semver 语义与市场侧 `includePrerelease` 语义**判决一致**（见下「自检」）。
 - **v0.4.8 修正**：此前区间写作 `… || >=0.1.6-0`，其末项在**普通语义**下**不覆盖**任何 `0.1.7-*` / `0.2.0-*` 预发布版（只在 `includePrerelease` 下才成立），实测有 **6 条分流**（`0.1.7-alpha.1/2`、`0.1.7-rc.1/2`、`0.2.0-rc.1/2`）。原因同上一节：预发布版只与同 `x.y.z` 的元组比较，而 `>=0.1.6-0` 的下界落在 0.1.6 线。更隐蔽的是——当时 0b 的版本表**只列了 21 个**，恰好漏掉整条 0.1.7/0.2.0 线，于是「两种语义判决一致」那条断言**假绿**。现改为逐条发布线 `^0.1.6-0 || ^0.1.7-0 || ^0.2.0-0 || >=0.3.0-0` 并**全量列表**，令同类裂缝无处可藏。
 
-> **验证口径**：`node tools/compat-check.mjs` 跑在本机已装内核副本的**真实 cordis** 上（v0.4.32 实测 **127/127** 全绿；断言计数随内核枚举动态变化，门槛是**零 FAIL** 而非某个具体数字，因此别把它当固定指标读。另注意它需要 `DSH_CORDIS_ENTRY` / `DSH_SEMVER_ENTRY` 指向可用的 cordis 与 semver——本机可指向仓库内 `.scratch/kernel/...`），场景断言七个功能的槽位注册、子 fiber 状态与 boot 审计口径；B3 自 v0.4.25 起改为「Definition 通道已移除」的源码反向钉（不再逐内核驱动装配器）；B4 自 v0.4.30 起覆盖功能七待办进度面板（注册位/纯函数推断口径/不降级/副作用矩阵/fail-open）。真机（浏览器）行为另由 `tools/live-smoke.mjs` 覆盖（含 2c 功能五胶囊浮窗契约与 2d 功能七待办进度面板 CSS 契约），需自备 URL+token。
+> **验证口径**：`node tools/compat-check.mjs` 跑在**真实 cordis** 上（v0.4.33 实测 **127/127** 全绿；断言计数随内核枚举动态变化，门槛是**零 FAIL** 而非某个具体数字，因此别把它当固定指标读）。
+> 内核来源自 v0.4.33 起是**三级自动定位**：`DSH_CORDIS_ENTRY` / `DSH_SEMVER_ENTRY` 显式指定 → `%APPDATA%\DSH-Exoskeleton\kernels` / `~/.dsh/kernels` 目录扫描 → **桌面版 `app.asar` 解包回退**
+> （按 `dependencies` 只解所需闭包到 `%TEMP%\dsh-ui-tools-asar\<体积>-<修改时间>\`，内核升级后自动换目录并清掉旧的），因此**不再需要手工设环境变量**；
+> 汇总行会打印实际来源，例如 `合计 127/127 通过（cordis：app.asar → ...\@deepseek-ai\cordis\lib\index.js）`。
+> 场景断言七个功能的槽位注册、子 fiber 状态与 boot 审计口径；B3 自 v0.4.25 起改为「Definition 通道已移除」的源码反向钉（不再逐内核驱动装配器）；B4 自 v0.4.30 起覆盖功能七待办进度面板（注册位/纯函数推断口径/不降级/副作用矩阵/fail-open）。真机（浏览器）行为另由 `tools/live-smoke.mjs` 覆盖（含 2c 功能五胶囊浮窗契约与 2d 功能七待办进度面板 CSS 契约），需自备 URL+token。
 
 > **profile 安装漂移**：`tools/check-profile-drift.mjs` 会比对 `~/.dsh/profiles/*/` 三处口径——`package.json` 的声明、`pnpm-lock.yaml` 的 specifier 与 resolved 版本、`node_modules` 里实际安装的版本。三者不一致时必须先修 profile，否则「改了代码、刷新页面、毫无变化」——因为真实 GUI 跑的是 profile 里的安装副本，而 `compat-check.mjs` 读的**永远是仓库 `lib/client.js`**，两者是两份文件。
 
@@ -373,7 +377,31 @@ node tools/live-smoke.mjs <URL+token>   # 真机冒烟（可选；自动探测�
 
 ## 变更记录
 
-- **v0.4.32（本次）**：**插件简介改回一句话**（用户：「把插件的简介弄简短一点啊，现在点开插件一大篇」）。
+- **v0.4.33（本次）**：**修 `compat-check` 在「本机没有 kernels 目录」的桌面版上直接 exit 2**（用户：「运行测试并修复失败的部分」）。
+  - **现象**：`npm run check` 真实退出码 **2**，唯一失败点是 `tools/compat-check.mjs` 报
+    `找不到本机 cordis（DSH 内核副本）。可设 DSH_CORDIS_ENTRY 指向 cordis/lib/index.js 再跑。`；
+    检查链是 `&&` 串联，它一失败，后面的 `tools/live-smoke.mjs` **从来没被执行过**。
+    更阴的是把输出管道接 `| tail` 时看到的退出码是 0（取到的是管道末段进程的状态），差点当成全绿读过去。
+  - **根因**：`locateCordis()` / `locateSemver()` 只会扫 `%APPDATA%\DSH-Exoskeleton\kernels` 与 `~/.dsh/kernels`。
+    桌面版 0.2.1-rc.2 起内核整体打进 `...\Programs\DeepSeek Harness\resources\app.asar`（布局 `dsh/node_modules/@deepseek-ai/cordis`），
+    这两个目录在本机**根本不存在** → 定位失败即 `process.exit(2)`。
+    对照实验证明断言本身是健康的：手工把 `DSH_CORDIS_ENTRY` / `DSH_SEMVER_ENTRY` 指向一份可用副本后立刻 `127/127 通过` —— 坏的只是「定位方式」。
+  - **修法**：定位改为**三级** —— 显式环境变量 → kernels 目录扫描 → **`app.asar` 解包回退**。
+    新增共用实现 `openAsar()` / `asarNode()` / `asarRead()` / `asarExtract()` / `extractFromAsar()`：
+    asar 头 `readUInt32LE(12)` 取目录表大小、条目偏移从 `16 + headerSize` 起算；**只按 `package.json` 的 `dependencies` 递归解所需闭包**
+    （实测 cordis 只带出 `@deepseek-ai/cosmokit` + `@standard-schema/spec`，共 **464 KB**，不是把 182 MB 的 asar 摊开）；
+    解到 `%TEMP%\dsh-ui-tools-asar\<体积>-<修改时间>\node_modules\`，入口按 `package.json` 的 `main` 解析（不写死路径）；
+    新目录建立时**清掉旧 stamp**，内核反复升级也不会越积越多。`semver` 同样走这条回退 —— 它若缺席，场景 0b 的声明层断言会直接 FAIL。
+  - **顺手收口**：`loadKernelAssemblers()` 的来源②原本**另写了一份手写 asar 解析**，与 `extractFromAsar` 是两套实现
+    （历史上正因两处漂移，来源②曾漏掉 `dsh/node_modules` 前缀而**静默失效**），现统一复用同一套读取函数。
+  - **验证**：`npm run check` **EXIT=0、0 FAIL** —— `check-hooks-order` 7/7、`check-model-seat-hug` 38/38、`check-context-menu` 228/228、
+    `check-profile-drift` 3/3、`compat-check` **127/127**（来源打印为 `app.asar → ...\cordis\lib\index.js`）、`live-smoke` SKIP（拿不到 URL/token 时的设计行为，非失败）。
+    边界两条实测：手工造一个陈旧 cache 目录 → 跑完被自动清掉；把整个 cache 删空 → 自动重建并仍 127/127。
+    **负向对照**：第一版 `extractFromAsar` 把包路径写成不带 `dsh/node_modules` 前缀，`asarNode` 查不到 → 仍然 exit 2（白改一次），修正后才通过 —— 正好证明这条断言不是摆设。
+  - **文档与版本**：`package.json` `0.4.32 → 0.4.33`（`description` 不动）；README 验证口径段改写为三级定位口径、删掉「需手工设环境变量」的过期说法；AGENT.md §4 口径同步（AGENT.md 不入库）。
+  - **行为影响**：只改 `tools/` 下的检查脚本，`lib/client.js` **零改动** —— 插件运行时行为与本版无关，升级只为让「本仓库的测试能跑」这件事对得上号。
+
+- **v0.4.32（历史）**：**插件简介改回一句话**（用户：「把插件的简介弄简短一点啊，现在点开插件一大篇」）。
   - **根因**：真机定位到 DSH「插件」页点开某插件后的**详情面板**，是把该包 `package.json` 的 `description` 字段**原样全文渲染**的；
     而本项目此前惯例是「每版在 description 末尾追加一条变更说明」，v0.4.2 一路累积到 v0.4.31，`description` 涨到 **16376 字**，
     所以点开就是一大篇。（列表页的卡片是单行 `-webkit-line-clamp: 1` 截断，本来不丑——丑的只有点开之后。）

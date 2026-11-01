@@ -1,6 +1,6 @@
 {
   "name": "dsh-ui-tools",
-  "version": "0.4.32",
+  "version": "0.4.33",
   "description": "DSH Web UI 工具集：模型选择双按钮、工作区折叠/展开、会话工作区徽章、插件设置页、可拖动输出速度计胶囊、列表右键菜单（删除会话/工作区）、待办进度面板。只改界面，不改内核源码。",
   "type": "module",
   "main": "lib/index.js",

@@ -35,6 +35,7 @@
  */
 
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -49,7 +50,7 @@ const results = [];
 const check = (label, ok, detail = "") => results.push({ label, ok: !!ok, detail: ok ? detail : (detail || "未满足") });
 const section = (title) => results.push({ section: title });
 
-/* ══════════════════════ cordis 定位（本机内核副本） ══════════════════════ */
+/* ══════════════════════ 本机内核副本定位 ══════════════════════ */
 
 function kernelRoots() {
 	const appData = process.env.APPDATA || path.join(process.env.HOME || "", "AppData", "Roaming");
@@ -57,7 +58,144 @@ function kernelRoots() {
 		.filter((dir) => { try { return fs.statSync(dir).isDirectory(); } catch { return false; } });
 }
 
-/** 在候选内核里找 cordis 的 ESM 入口；默认取版本号最大的内核。 */
+/**
+ * 桌面版自带的内核（整个 dsh/ 树打包在 app.asar 里，**不落** kernels 目录）。
+ *
+ * 为什么必须支持这条路：`%APPDATA%\DSH-Exoskeleton\kernels\` 是「托管内核副本」，
+ * 但桌面版升级会把它整目录换掉/清掉 —— 本机 2026-11-01 实测该目录已不存在，
+ * 于是 compat-check 在定位这一步就 `exit 2`，后面所有断言一条都没跑，
+ * `npm run check` 整条链（&& 串联）连带 live-smoke 一起中断。
+ * 此时唯一真实存在的内核就是 app.asar 里那一份，把它解到临时目录再 import 即可。
+ *
+ * asar 格式：前 16 字节头（第 12 字节起 4 字节 = 头部 JSON 长度），
+ * 随后是 JSON 目录表，文件内容偏移相对 `16 + headerSize` 这个数据区起点。
+ */
+
+/** app.asar 及其 unpacked 伴生目录的绝对路径。 */
+function desktopAsarPaths() {
+	const localAppData = process.env.LOCALAPPDATA || path.join(process.env.HOME || "", "AppData", "Local");
+	const asar = path.join(localAppData, "Programs", "DeepSeek Harness", "resources", "app.asar");
+	return { asar, unpacked: `${asar}.unpacked` };
+}
+
+/** 打开 asar 并解析头部目录表；不存在/结构不符时返回 null。调用方负责 closeSync(fd)。 */
+function openAsar() {
+	const { asar, unpacked } = desktopAsarPaths();
+	if (!fs.existsSync(asar)) return null;
+	let fd = null;
+	try {
+		fd = fs.openSync(asar, "r");
+		const head = Buffer.alloc(16);
+		fs.readSync(fd, head, 0, 16, 0);
+		const headerSize = head.readUInt32LE(12);
+		const hbuf = Buffer.alloc(headerSize);
+		fs.readSync(fd, hbuf, 0, headerSize, 16);
+		return { asar, unpacked, fd, header: JSON.parse(hbuf.toString("utf8")), baseOffset: 16 + headerSize };
+	} catch (error) {
+		if (fd !== null) try { fs.closeSync(fd); } catch { /* 已关闭 */ }
+		return null;
+	}
+}
+
+/** 按路径段取 asar 目录表里的条目（文件或目录）；不存在返回 undefined。 */
+function asarNode(handle, parts) {
+	return parts.reduce((node, part) => (node && node.files ? node.files[part] : void 0), handle.header);
+}
+
+/** 读 asar 内的一个文件；unpacked 条目从 app.asar.unpacked 读实体文件。 */
+function asarRead(handle, parts) {
+	const node = asarNode(handle, parts);
+	if (node === void 0 || typeof node.size !== "number") return null;
+	if (node.unpacked) {
+		try { return fs.readFileSync(path.join(handle.unpacked, ...parts)); } catch { return null; }
+	}
+	const buf = Buffer.alloc(node.size);
+	fs.readSync(handle.fd, buf, 0, node.size, handle.baseOffset + Number(node.offset));
+	return buf;
+}
+
+/** 把 asar 里的一个文件/整棵子树落到本地磁盘。 */
+function asarExtract(handle, parts, dest) {
+	const node = asarNode(handle, parts);
+	if (node === void 0) return false;
+	if (node.files) {
+		fs.mkdirSync(dest, { recursive: true });
+		for (const name of Object.keys(node.files)) asarExtract(handle, [...parts, name], path.join(dest, name));
+		return true;
+	}
+	if (typeof node.link === "string") {
+		// asar 内的符号链接：按相对目标把实体文件复制过去（本工具只需要可 import 的纯 JS 包）。
+		const target = path.posix.normalize([...parts.slice(0, -1), node.link].join("/")).split("/");
+		return asarExtract(handle, target, dest);
+	}
+	const buf = asarRead(handle, parts);
+	if (buf === null) return false;
+	fs.mkdirSync(path.dirname(dest), { recursive: true });
+	fs.writeFileSync(dest, buf);
+	return true;
+}
+
+/**
+ * 从 app.asar 里解出一个包（含其 `dependencies` 闭包）到临时缓存目录，返回可 import 的入口。
+ *
+ * asar 内的布局是 `dsh/node_modules/<pkg>/...`；落盘时**去掉** `dsh/node_modules` 前缀，
+ * 铺成标准的 `<cache>/node_modules/<pkg>/...` —— 这样包内部的裸导入按 Node 规则
+ * 逐级向上就能解析到同层兄弟依赖，不需要改写任何 import。
+ * 缓存目录名带 asar 的体积+修改时间，内核升级后自动换新目录，不会误用旧副本。
+ *
+ * @param {string[]} pkgParts 包路径段（相对 node_modules），如 ["@deepseek-ai","cordis"]
+ * @returns {string|null} 包入口绝对路径（按 package.json 的 main 解析）；asar 缺席或缺该包时返回 null。
+ */
+function extractFromAsar(pkgParts) {
+	const ASAR_NM = ["dsh", "node_modules"];
+	const handle = openAsar();
+	if (handle === null) return null;
+	try {
+		const meta = asarRead(handle, [...ASAR_NM, ...pkgParts, "package.json"]);
+		if (meta === null) return null;
+		let json = null;
+		try { json = JSON.parse(meta.toString("utf8")); } catch { return null; }
+		const main = typeof json.main === "string" ? json.main : "index.js";
+		const stat = fs.statSync(handle.asar);
+		const cacheRoot = path.join(os.tmpdir(), "dsh-ui-tools-asar");
+		const root = path.join(cacheRoot, `${stat.size}-${Math.round(stat.mtimeMs)}`);
+		const entry = path.join(root, "node_modules", ...pkgParts, main);
+		if (!fs.existsSync(entry)) {
+			// 内核升级后旧 stamp 目录已无用：只留当前这一份，别让临时目录越积越多。
+			try {
+				for (const name of fs.readdirSync(cacheRoot)) {
+					if (name === path.basename(root)) continue;
+					fs.rmSync(path.join(cacheRoot, name), { recursive: true, force: true });
+				}
+			} catch { /* 缓存目录尚不存在或不可清理：不影响断言 */ }
+			const seen = new Set();
+			const walk = (parts) => {
+				const key = parts.join("/");
+				if (seen.has(key)) return;
+				seen.add(key);
+				const source = [...ASAR_NM, ...parts];
+				if (asarNode(handle, source) === void 0) return;
+				asarExtract(handle, source, path.join(root, "node_modules", ...parts));
+				const depMeta = asarRead(handle, [...source, "package.json"]);
+				if (depMeta === null) return;
+				let depJson = null;
+				try { depJson = JSON.parse(depMeta.toString("utf8")); } catch { return; }
+				for (const dep of Object.keys(depJson.dependencies || {})) walk(dep.split("/"));
+			};
+			walk(pkgParts);
+		}
+		return fs.existsSync(entry) ? entry : null;
+	} finally {
+		try { fs.closeSync(handle.fd); } catch { /* 已关闭 */ }
+	}
+}
+
+/**
+ * 在候选内核里找 cordis 的 ESM 入口；默认取版本号最大的内核。
+ * 两个来源：① 托管内核副本 `kernels/<ver>/node_modules/.pnpm/@deepseek-ai+cordis@*`
+ * （含历史版本，可用 DSH_KERNEL_DIR 指定）；② 桌面版 app.asar 内打包的那一份
+ * （kernels 目录被清掉后唯一可用的来源，见 openAsar 的说明）。
+ */
 function locateCordis() {
 	const explicit = process.env.DSH_CORDIS_ENTRY;
 	if (explicit && fs.existsSync(explicit)) return { kernel: "DSH_CORDIS_ENTRY", entry: explicit };
@@ -76,14 +214,23 @@ function locateCordis() {
 			}
 		}
 	}
-	if (!found.length) return null;
-	found.sort((a, b) => (a.kernel < b.kernel ? 1 : -1));
-	return found[0];
+	if (found.length) {
+		found.sort((a, b) => (a.kernel < b.kernel ? 1 : -1));
+		return found[0];
+	}
+	const fromAsar = extractFromAsar(["@deepseek-ai", "cordis"]);
+	if (fromAsar !== null) return { kernel: "app.asar", entry: fromAsar };
+	return null;
 }
 
 const located = locateCordis();
 if (!located) {
-	console.error("找不到本机 cordis（DSH 内核副本）。可设 DSH_CORDIS_ENTRY 指向 cordis/lib/index.js 再跑。");
+	const { asar } = desktopAsarPaths();
+	console.error(
+		"找不到本机 cordis。已尝试：① 托管内核副本 %APPDATA%\\DSH-Exoskeleton\\kernels、~/.dsh/kernels；"
+		+ `② 桌面版 ${asar} 内的 @deepseek-ai/cordis（均已缺席）。`
+		+ "可设 DSH_CORDIS_ENTRY 指向 cordis/lib/index.js 再跑。"
+	);
 	process.exit(2);
 }
 const { Context, Service } = await import(pathToFileURL(located.entry).href);
@@ -112,7 +259,8 @@ function locateSemver() {
 			}
 		}
 	}
-	return null;
+	// 回退：桌面版 app.asar 里的 semver（kernels 目录缺席时，这条是唯一来源）。
+	return extractFromAsar(["semver"]);
 }
 
 const semverEntry = locateSemver();
@@ -425,30 +573,12 @@ function loadKernelAssemblers() {
 	}
 
 	// 来源 ②：桌面版自带的内核（打包在 app.asar 内，**不在** kernels 目录）。
-	// asar 头部是 JSON 目录表，条目 offset 相对「16 + headerSize」的数据区。
-	const asarPath = path.join(
-		process.env.LOCALAPPDATA || path.join(process.env.HOME || "", "AppData", "Local"),
-		"Programs", "DeepSeek Harness", "resources", "app.asar"
-	);
-	try {
-		const fd = fs.openSync(asarPath, "r");
+	// asar 解析/读取统一走上面的 openAsar / asarRead —— 同一份实现，避免两处结构漂移。
+	const asar = openAsar();
+	if (asar !== null) {
 		try {
-			const head = Buffer.alloc(16);
-			fs.readSync(fd, head, 0, 16, 0);
-			const headerSize = head.readUInt32LE(12);
-			const hbuf = Buffer.alloc(headerSize);
-			fs.readSync(fd, hbuf, 0, headerSize, 16);
-			const header = JSON.parse(hbuf.toString("utf8"));
-			const baseOffset = 16 + headerSize;
-			const target = ["dsh", "node_modules", "@deepseek-ai", "dsh-client-ui-conversation", "lib", "client.js"];
-			let node = header;
-			for (const part of target) {
-				node = node && node.files ? node.files[part] : void 0;
-				if (node === void 0) break;
-			}
-			if (node !== void 0 && typeof node.size === "number") {
-				const buf = Buffer.alloc(node.size);
-				fs.readSync(fd, buf, 0, node.size, baseOffset + Number(node.offset));
+			const buf = asarRead(asar, ["dsh", "node_modules", "@deepseek-ai", "dsh-client-ui-conversation", "lib", "client.js"]);
+			if (buf !== null) {
 				// asar 条目前可能有 1..n 字节对齐填充；从 __ModuleLoader__ 处起算。
 				const code = buf.toString("utf8");
 				const at = code.indexOf("window.__ModuleLoader__");
@@ -457,8 +587,10 @@ function loadKernelAssemblers() {
 					if (hit !== null) found.push(hit);
 				}
 			}
-		} finally { fs.closeSync(fd); }
-	} catch (error) { /* asar 不存在或结构不同：静默跳过 */ }
+		} catch (error) { /* asar 结构不同：静默跳过 */ } finally {
+			try { fs.closeSync(asar.fd); } catch { /* 已关闭 */ }
+		}
+	}
 
 	return found;
 }/** 极简偏好仓库替身：只需 subscribe/getSnapshot。 */
